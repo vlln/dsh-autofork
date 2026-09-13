@@ -215,14 +215,32 @@ for (let attempt = 0; attempt < 20; attempt += 1) {
   await sleep(500)
 }
 
+const nodes = Array.isArray(health?.nodes) ? health.nodes : []
+// 「分叉」页签吃的是这个数组，所以这里同时钉住**它要显示的四项**：
+// `label`（去掉徽章前缀的显示名）、`ordinal`（徽章）、`at`（什么时候分的）、
+// `trigger`（为什么分的）——跨进程读回来时也必须齐全，否则页签在重启后就只剩名字。
+const forked = nodes.find(node => node.current === true)
+const pageData = forked === undefined ? null : {
+  label: forked.label,
+  ordinal: forked.ordinal,
+  at: typeof forked.at === 'number' ? 'number' : forked.at,
+  trigger: forked.trigger,
+}
 say({
   phase: PHASE,
   asked: head,
   health: health ?? null,
   // 判据：整棵树必须从**根**开始，且这条 head 落在里面——这棵树完全是**跨进程**读回来的。
-  nodes: Array.isArray(health?.nodes) ? health.nodes : null,
+  nodes,
+  pageData,
   stderr: out.slice(-300),
 })
 web.kill('SIGKILL')
 await sleep(200)
-process.exit(Array.isArray(health?.nodes) && health.nodes.length >= 2 ? 0 : 1)
+const ok = nodes.length >= 2
+  && pageData !== null
+  && typeof pageData.label === 'string' && pageData.label !== ''
+  && typeof pageData.ordinal === 'number' && pageData.ordinal > 0
+  && pageData.at === 'number'
+  && typeof pageData.trigger === 'string' && pageData.trigger !== ''
+process.exit(ok ? 0 : 1)

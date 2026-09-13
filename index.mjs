@@ -37,12 +37,20 @@ import { Session, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { resolveParams, describeParams } from './src/params.mjs'
 import {
-  activeTargets, boundSummary, driverLabel, instanceReplySummary, renderBranchHint,
+  activeTargets, boundSummary, driverLabel, instanceReplySummary, messageText, renderBranchHint,
   renderForkNotice, renderInFlightDigest, renderInstanceReply, renderWorkerReply,
   shortSessionId,
 } from './src/digest.mjs'
 import { createBranchTools } from './src/tools.mjs'
 import { createLineage } from './src/lineage.mjs'
+
+/**
+ * 「触发指令」在血缘边/UI 里的字符上限。
+ *
+ * 页签上就是一行省略号文本，存全量只会在持久化里留一堆用户原文；120 字符足够认出
+ * "是那条 worktree 的指令"，与 digest 的 `digestAssistantChars` 同一量级。
+ */
+const TRIGGER_MAX_CHARS = 120
 
 /** Cordis 插件名。 */
 export const name = 'dsh-autofork'
@@ -580,9 +588,21 @@ export function apply(ctx, config) {
       const edge = edgeOf(item.id)
       const agent = ctx.agents.get(item.id)
       const state = agent === undefined ? 'finished' : (agent.status === 'running' ? 'running' : 'idle')
+      const ordinal = edge?.ordinal ?? recordByHead.get(item.id)?.titleOrdinal ?? 0
+      const full = titleOfLive(item.id) ?? edge?.title ?? lineageTitleOf(item.id) ?? null
+      // `label`：把**已经由徽章表达**的 `<标记><序号> ` 前缀去掉之后的显示名。
+      // 页签左边就有一枚 `⑂1` 徽章，名字里再带一遍会读成"⑂1 ⑂1 修 GUI 卡顿"（实测
+      // 在预览里一眼看到）。前缀用 `params.titleMark` + 序号精确匹配，不是正则猜——
+      // 标记是可配的，配了自定义标记时这里也照样对得上。
+      const prefix = ordinal > 0 && params.titleMark !== '' ? `${params.titleMark}${ordinal} ` : ''
+      const label = prefix !== '' && typeof full === 'string' && full.startsWith(prefix)
+        ? full.slice(prefix.length)
+        : full
       nodes.push({
         sessionId: item.id,
-        title: titleOfLive(item.id) ?? edge?.title ?? lineageTitleOf(item.id) ?? null,
+        title: full,
+        /** 显示名（去掉徽章已经表达过的 `<标记><序号> ` 前缀）；UI 用它，工具面不用。 */
+        label,
         state,
         busy: state === 'running',
         /** 树上的深度：0 = 家族根（最开始那条会话）。UI 用它做缩进。 */
@@ -591,6 +611,13 @@ export function apply(ctx, config) {
         current: item.id === sessionId,
         /** 它接管了谁（家族根为 null）——UI 画连线、判断分组用。 */
         parentId: edge === undefined ? null : edge.workerId,
+        // ---- 下面三项是给「分叉」页签的"对用户有意义的信息"，工具面不用（见 memberView）----
+        /** 这次分叉发生在什么时候（epoch ms）；家族根是用户自己开的会话，没有这一项。 */
+        at: edge?.createdAt ?? recordByHead.get(item.id)?.createdAt ?? null,
+        /** 触发这次分叉的那条用户指令（空串 = 不知道）。 */
+        trigger: edge?.trigger ?? recordByHead.get(item.id)?.trigger ?? '',
+        /** 命名序号（`<标记><ordinal>`）；没开命名或家族根时为 0。 */
+        ordinal,
       })
       for (const headId of headsOf(item.id)) queue.push({ id: headId, depth: item.depth + 1 })
     }
@@ -1041,7 +1068,11 @@ export function apply(ctx, config) {
       headId,
       workerId: session.id,
       // **建分叉的时刻**：树里的兄弟顺序按它排（必须稳定，否则每次重启画的树都不一样）。
+      // 「分叉」页签也把它当"这次分叉发生在什么时候"显示。
       createdAt: Date.now(),
+      // 触发这次分叉的那条用户指令（有界一行）。页签要用它回答"这条分叉是为什么来的"——
+      // 同族的几条第名字一样（都是 `<标记><序号> <家族根名>`），只有这条指令能区分。
+      trigger: messageText(message, TRIGGER_MAX_CHARS),
       // 容器模式下**永不**把用户切走：容器就是用户所在的会话，driver 换人不换容器。
       // 非容器模式才是"容器前移"（见 params.followHead 的注释）。
       handoffPending: containerMode ? false : params.followHead === true,
@@ -1123,6 +1154,7 @@ export function apply(ctx, config) {
         base: naming?.base ?? '',
         title: naming?.title ?? '',
         createdAt: record.createdAt,
+        trigger: record.trigger,
       })
     }
 

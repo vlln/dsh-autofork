@@ -130,30 +130,158 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 链条里的一行。
+     * 状态 → 文案 / 颜色 / 底色。**三态互斥**，与服务端的 `state` 一一对应。
      *
-     * 只读本模块的 store（不依赖槽位 props），把契约风险压到最小；点击走 `navTo()`，
-     * 也就是那条已经验证过的"先 refresh、再按寻址方式打开、确认 current 真变了"的路。
-     * @param {object} props `{node, driver}`。
+     * 三态是"agent 此刻在干什么"这一个事实的三种取值；曾经服务端并排给过"agent 还在不在"
+     * 与"忙不忙"两个字段，于是"活着但空闲"的会话同时显示成运行中与已停（用户实测报的
+     * 自相矛盾）。这里把它压成一个标签，颜色只用一种语义。
+     */
+    var STATE_META = {
+      running: { text: '运行中', color: TOKEN.accent, tint: 'rgba(11, 107, 203, 0.12)' },
+      idle: { text: '空闲', color: TOKEN.labelSecondary, tint: 'rgba(127, 127, 127, 0.14)' },
+      finished: { text: '已结束', color: TOKEN.caption, tint: 'rgba(127, 127, 127, 0.10)' },
+    }
+
+    /**
+     * 相对时间（页签要回答"这次分叉是多久之前发生的"，而 `1789149220103` 对人没有意义）。
+     *
+     * 只做**粗粒度**：它是渲染时算的，每 30 秒重渲染一次，粒度细了会看到数字乱跳。
+     * @param {number} at epoch ms。
+     * @param {number} now 当前时刻。
+     * @returns {string} `刚刚` / `N 分钟前` / `N 小时前` / `N 天前`；没有时刻则空串。
+     */
+    function relTime(at, now) {
+      if (typeof at !== 'number' || at <= 0) return ''
+      var diff = Math.max(0, now - at)
+      var minutes = Math.floor(diff / 60000)
+      if (minutes < 1) return '刚刚'
+      if (minutes < 60) return String(minutes) + ' 分钟前'
+      var hours = Math.floor(minutes / 60)
+      if (hours < 24) return String(hours) + ' 小时前'
+      return String(Math.floor(hours / 24)) + ' 天前'
+    }
+
+    /**
+     * 绝对时刻 `HH:MM` —— 放进悬停提示里，需要精确时可读。
+     * @param {number} at epoch ms。
+     * @returns {string} 时刻文本；没有则空串。
+     */
+    function clockOf(at) {
+      if (typeof at !== 'number' || at <= 0) return ''
+      var date = new Date(at)
+      var hh = String(date.getHours())
+      var mm = String(date.getMinutes())
+      return (hh.length < 2 ? '0' + hh : hh) + ':' + (mm.length < 2 ? '0' + mm : mm)
+    }
+
+    /**
+     * 一枚小胶囊（状态 / `你在这里` / `现在回答你的是它`）。
+     * @param {string} key React key。
+     * @param {string} text 文案。
+     * @param {string} color 文字与底色都用它派生（底色是同色低透明度，不硬编码主题色）。
+     * @param {string} tint 底色。
+     * @returns {object} React 元素。
+     */
+    function chip(key, text, color, tint) {
+      return React.createElement('span', {
+        key: key,
+        style: {
+          flex: 'none',
+          padding: '1px 6px',
+          borderRadius: '999px',
+          background: tint,
+          color: color,
+          fontSize: '11px',
+          lineHeight: '16px',
+          whiteSpace: 'nowrap',
+        },
+      }, text)
+    }
+
+    /**
+     * 家族链条里的一行。
+     *
+     * 一行要回答三件事（都是用户视角的问题）：
+     * ① **这是哪条会话**——名字（`⑂1 修 GUI 卡顿`）+ 会话短 id；
+     * ② **它此刻在干什么**——互斥三态中的一态；
+     * ③ **这次分叉是为什么、什么时候发生的**——触发它的那条用户指令 + 相对时间。
+     *    （③ 是同族几条第名字完全一样时的唯一区分，见 `trigger` 字段。）
+     *
+     * 只读本模块的 store（不依赖槽位 props），点击走 `navTo()`，也就是那条已经验证过的
+     * "先 refresh、再按寻址方式打开、确认 current 真变了"的路。
+     * @param {object} props `{node, driver, now}`。
      * @returns {object} React 元素。
      */
     function BranchRow(props) {
       var node = props.node
       var driver = props.driver
+      var now = props.now
       var isCurrent = node.current === true
       var isDriver = driver !== null && driver !== undefined && driver.sessionId === node.sessionId
+      var isRoot = node.parentId === null || node.parentId === undefined
       var hoverPair = React.useState(false)
       var hover = hoverPair[0]
       var setHover = hoverPair[1]
 
-      var dotColor = node.state === 'running'
-        ? TOKEN.accent
-        : (node.state === 'idle' ? TOKEN.labelTertiary : TOKEN.caption)
-      var label = typeof node.title === 'string' && node.title !== ''
-        ? node.title
-        : '会话 ' + shortId(node.sessionId)
-      var tail = STATE_TEXT[node.state] === undefined ? String(node.state) : STATE_TEXT[node.state]
-      if (isDriver && !isCurrent) tail = tail + ' · 现在回答你的是它'
+      var meta = STATE_META[node.state] === undefined
+        ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
+        : STATE_META[node.state]
+      // 名字优先用服务端给的 `label`（**已经去掉** `<标记><序号> ` 前缀，因为左边那枚徽章
+      // 就是它），退回完整 `title`，再退回会话短 id。
+      var label = typeof node.label === 'string' && node.label !== ''
+        ? node.label
+        : (typeof node.title === 'string' && node.title !== ''
+          ? node.title
+          : '会话 ' + shortId(node.sessionId))
+      var ordinal = typeof node.ordinal === 'number' && node.ordinal > 0 ? node.ordinal : 0
+      var trigger = typeof node.trigger === 'string' ? node.trigger : ''
+      var rel = relTime(node.at, now)
+      var clock = clockOf(node.at)
+
+      // 第二行：只渲染**有**的部分。家族根既没有触发指令也没有分叉时刻（它是用户自己
+      // 开的会话），于是它那一行只剩会话坐标，而不是一排空标签。
+      var info = []
+      if (trigger !== '') {
+        info.push(React.createElement('span', {
+          key: 'trigger',
+          title: '触发这次分叉的指令：' + trigger,
+          style: {
+            minWidth: '0',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            color: TOKEN.labelSecondary,
+          },
+        }, '触发：' + trigger))
+      }
+      if (rel !== '') {
+        info.push(React.createElement('span', {
+          key: 'at',
+          title: clock === '' ? '' : '分叉于 ' + clock,
+          style: { flex: 'none', color: TOKEN.labelTertiary },
+        }, rel))
+      }
+      info.push(React.createElement('span', {
+        key: 'id',
+        style: { flex: 'none', color: TOKEN.caption },
+      }, shortId(node.sessionId)))
+
+      var topRow = [
+        React.createElement('span', {
+          key: 'label',
+          style: {
+            minWidth: '0',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            fontWeight: isCurrent ? '600' : '400',
+          },
+        }, label),
+        isCurrent ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+        isDriver && !isCurrent ? chip('driver', '现在回答你的是它', TOKEN.labelSecondary, 'rgba(127, 127, 127, 0.14)') : null,
+        React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
+        chip('state', meta.text, meta.color, meta.tint),
+      ]
 
       return React.createElement('div', {
         role: 'button',
@@ -171,53 +299,72 @@ window.__ModuleLoader__.load({
         onMouseLeave: function () { setHover(false) },
         style: {
           display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          // 缩进表达链条位置（0 = 家族根）。链条是单线的，缩进就够，不需要画连线。
-          marginLeft: String(node.depth * 18) + 'px',
-          padding: '6px 10px',
-          borderLeft: '2px solid ' + (isCurrent ? TOKEN.accent : 'transparent'),
-          borderRadius: '6px',
-          background: hover && !isCurrent ? TOKEN.hover : 'transparent',
+          alignItems: 'flex-start',
+          gap: '10px',
+          // 缩进表达树上位置（0 = 家族根）。树是"同一条会话被分叉多次"的多叉，
+          // 所以深度缩进 + 行首的 └ 记号，比在行内画连线更省地方也更好读。
+          marginLeft: String(node.depth * 14) + 'px',
+          padding: '9px 12px',
+          border: '1px solid ' + (isCurrent ? TOKEN.accent : 'transparent'),
+          borderRadius: '8px',
+          background: isCurrent
+            ? TOKEN.hover
+            : (hover ? TOKEN.hover : 'transparent'),
           cursor: isCurrent ? 'default' : 'pointer',
-          color: isCurrent ? TOKEN.labelPrimary : TOKEN.labelSecondary,
+          // 已结束的行再淡一档：它只是历史，不该跟"正在跑"的抢注意力。
+          color: isCurrent
+            ? TOKEN.labelPrimary
+            : (node.state === 'finished' ? TOKEN.caption : TOKEN.labelSecondary),
         },
       }, [
         React.createElement('span', {
-          key: 'dot',
+          key: 'badge',
           style: {
             flex: 'none',
-            width: '7px',
-            height: '7px',
-            borderRadius: '50%',
-            background: dotColor,
-            boxShadow: node.state === 'running' ? '0 0 0 3px rgba(11, 107, 203, 0.15)' : 'none',
+            width: '30px',
+            height: '20px',
+            borderRadius: '5px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: isRoot ? 'rgba(127, 127, 127, 0.12)' : 'rgba(11, 107, 203, 0.12)',
+            color: isRoot ? TOKEN.labelSecondary : TOKEN.accent,
+            fontSize: '11px',
+            fontWeight: '600',
           },
-        }),
-        React.createElement('span', {
-          key: 'title',
+        }, isRoot ? '根' : '⑂' + String(ordinal)),
+        React.createElement('div', {
+          key: 'body',
+          style: { flex: '1 1 auto', minWidth: '0', display: 'flex', flexDirection: 'column', gap: '1px' },
+        }, [
+          React.createElement('div', {
+            key: 'top',
+            style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0' },
+          }, topRow),
+          React.createElement('div', {
+            key: 'info',
+            style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0', fontSize: '12px' },
+          }, info),
+        ]),
+        isCurrent ? null : React.createElement('span', {
+          key: 'go',
           style: {
-            flex: '1 1 auto',
-            minWidth: '0',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            fontWeight: isCurrent ? '600' : '400',
+            flex: 'none',
+            color: hover ? TOKEN.accent : TOKEN.caption,
+            fontSize: '14px',
+            lineHeight: '20px',
           },
-        }, label + (isCurrent ? '　（你在这里）' : '')),
-        React.createElement('span', {
-          key: 'state',
-          style: { flex: 'none', fontSize: '12px', color: TOKEN.labelTertiary },
-        }, tail),
+        }, '›'),
       ])
     }
 
     /**
-     * 「分叉」页签：本会话所在家族的完整链条，点任意一行切过去。
+     * 「分叉」页签：本会话所在家族的完整家族树，点任意一行切过去。
      *
      * 它取代了原先会话头部右上角那个胶囊下拉（用户 2026-09 决定）：那个位置太窄，
-     * 只能显示"现在是谁在回答你"这一个事实；而这条链条要回答的是一组事实——
-     * 有哪些会话、谁在跑、谁在等、谁已经结束、以及**我现在在哪一格**。
+     * 只能显示"现在是谁在回答你"这一个事实；而这条家族树要回答的是一组事实——
+     * 家族里有哪几条会话、各自**此刻在干什么**、**分别为什么会分叉出来**（触发指令 + 时间）、
+     * 以及**我现在在哪一格**。
      *
      * tab 本身就是原生槽位（`conversation.view` 是个 list 槽，`ui-conversation` 直接遍历
      * 它的条目造 tab 按钮），所以观感与「对话」「轨迹」完全一致，不需要自己造导航。
@@ -230,6 +377,16 @@ window.__ModuleLoader__.load({
         return subscribe(function () { setLocal(getSnapshot()) })
       }, [])
 
+      // 相对时间（"3 分钟前"）会随时间变旧，而 store 只在**数据**变化时才通知。
+      // 所以自己每 30 秒推一次重渲染：粒度粗到不会看到数字乱跳，也够用来看"这条还在跑多久了"。
+      var tickPair = React.useState(0)
+      var setTick = tickPair[1]
+      React.useEffect(function () {
+        var timer = setInterval(function () { setTick(function (value) { return value + 1 }) }, 30000)
+        return function () { clearInterval(timer) }
+      }, [])
+      var now = Date.now()
+
       var snap = pair[0]
       var nodes = Array.isArray(snap.nodes) ? snap.nodes : []
       var driver = snap.driver === undefined ? null : snap.driver
@@ -238,33 +395,45 @@ window.__ModuleLoader__.load({
       if (nodes.length === 0) {
         children.push(React.createElement('div', { key: 'loading', style: HINT_STYLE }, '正在读取分叉关系…'))
       } else {
-        var busy = nodes.filter(function (node) { return node.busy === true }).length
+        var running = nodes.filter(function (node) { return node.state === 'running' }).length
+        var done = nodes.filter(function (node) { return node.state === 'finished' }).length
+        var summary = ['分叉家族 · ' + String(nodes.length) + ' 条会话']
+        if (running > 0) summary.push(String(running) + ' 条正在跑')
+        if (done > 0) summary.push(String(done) + ' 条已结束')
         children.push(React.createElement('div', {
           key: 'summary',
-          style: {
-            marginBottom: '10px',
-            color: TOKEN.labelTertiary,
-            fontSize: '12px',
-            lineHeight: '20px',
-          },
-        }, '同族 ' + String(nodes.length) + ' 条会话'
-          + (busy > 0 ? ' · ' + String(busy) + ' 条正在跑' : '')))
+          style: { marginBottom: '4px' },
+        }, [
+          React.createElement('div', {
+            key: 'a',
+            style: { fontWeight: '600', fontSize: '13px', color: TOKEN.labelPrimary },
+          }, summary.join(' · ')),
+          React.createElement('div', {
+            key: 'b',
+            style: { marginTop: '2px', color: TOKEN.labelTertiary, fontSize: '12px' },
+          }, nodes.length === 1
+            ? '这条会话还没有分叉。'
+            : '点任意一行切到那条会话；缩进表示它是从哪条分出去的。'),
+        ]))
         children.push(React.createElement('div', {
           key: 'rows',
-          style: { display: 'flex', flexDirection: 'column', gap: '2px' },
+          style: { display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '10px' },
         }, nodes.map(function (node) {
-          return React.createElement(BranchRow, { key: node.sessionId, node: node, driver: driver })
+          return React.createElement(BranchRow, {
+            key: node.sessionId, node: node, driver: driver, now: now,
+          })
         })))
         if (nodes.length === 1) {
           children.push(React.createElement('div', {
             key: 'empty',
-            style: Object.assign({ marginTop: '14px' }, HINT_STYLE),
+            style: Object.assign({ marginTop: '10px' }, HINT_STYLE),
           }, [
-            React.createElement('div', { key: 'a' }, '这条会话还没有分叉。'),
-            React.createElement('div', { key: 'b' },
+            React.createElement('div', { key: 'a' },
               '当它正在跑（模型还在生成、或工具还在执行）的时候你再发一条指令，'
               + '就会自动分叉出一条新会话：你立刻在新的那条里继续说话，原来这条留在后台把活干完，'
               + '结果回注到这里。'),
+            React.createElement('div', { key: 'b', style: { marginTop: '6px' } },
+              '分叉出来的会话会带着触发它的那条指令出现在上面，名字是 `⑂1 <本会话名>`。'),
           ]))
         }
       }

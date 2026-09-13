@@ -101,12 +101,15 @@ export function safeJson(value) {
 }
 
 /**
- * 取出一个 user/assistant 消息的正文文本。
+ * 取出一个 user/assistant 消息的正文文本（跳过 `tool-call` 部件——那是参数，不是人说的话）。
+ *
+ * 导出是给**「分叉」页签**用的：它要显示"是哪条指令触发的这次分叉"。与 digest 共用同一个
+ * 取法，避免两处对"什么算正文"理解不一致。
  * @param {any} message 消息对象。
  * @param {number} limit 字符上限。
  * @returns {string} 正文文本。
  */
-function messageText(message, limit) {
+export function messageText(message, limit) {
   const content = message?.content
   if (!Array.isArray(content)) return ''
   const parts = []

@@ -1131,6 +1131,17 @@ test('health.nodes：链条按"根 → 最新"排序，且带 depth / current / 
   assert.deepEqual(headBody.nodes.map(node => node.parentId), [null, 'session-parent'])
   assert.equal(headBody.nodes[1].state, 'running', 'head 的 agent 还活着')
   assert.equal(headBody.nodes[0].state, 'running', '被接管的会话仍在后台跑它那一轮')
+  // 「分叉」页签要的三项"对用户有意义的信息"：什么时候分的、为什么分的、是几号。
+  assert.equal(typeof headBody.nodes[1].at, 'number', '分叉时刻')
+  assert.equal(headBody.nodes[1].trigger, '改成用 worktree 隔离')
+  assert.equal(headBody.nodes[1].ordinal, 1)
+  // `label`：去掉 `<标记><序号> ` 前缀的显示名（页签左边那枚徽章就是它，名字里再来一遍
+  // 会读成"⑂1 ⑂1 修 GUI 卡顿"）。
+  assert.equal(headBody.nodes[1].title, '⑂1 会话 parent', '命名基名取家族根标题（本用例没有标题服务）')
+  assert.equal(headBody.nodes[1].label, '会话 parent', 'label = title 去掉徽章那截前缀')
+  assert.equal(headBody.nodes[0].at, null, '家族根是用户自己开的会话，没有分叉时刻')
+  assert.equal(headBody.nodes[0].trigger, '')
+  assert.equal(headBody.nodes[0].ordinal, 0)
 })
 
 test('health.driver：没有下游时就是本会话（self）', async () => {
@@ -1250,6 +1261,16 @@ function edge(workerId, rootId, ordinal, createdAt, base = '修 GUI 卡顿') {
   return { workerId, rootId, ordinal, base, title: `⑂${ordinal} ${base}`, createdAt }
 }
 
+test('血缘边的 trigger 是可选字段：feature 之前写下的旧边照样读得回来（退化成空串）', async () => {
+  // 这条边**没有** trigger（模拟升级前落盘的记录）。
+  const { ctx, calls } = harness({ lineageEdges: { 'session-head-1': edge('session-parent', 'session-parent', 1, 1000) } })
+  applyChain(ctx, undefined)
+  const body = await callHealth(calls.routes, 'sessionId=session-parent')
+  assert.equal(body.nodes.length, 2)
+  assert.equal(body.nodes[1].trigger, '', '没有 trigger 的旧边 → 空串，页签不显示那一行')
+  assert.equal(body.nodes[1].at, 1000, '其余字段照常可用')
+})
+
 test('分叉时把血缘边写进官方存储域（这是重启后关系不丢的唯一依据）', async () => {
   const { ctx, calls, emitInsert } = titledHarness({ 'session-parent': '修 GUI 卡顿' })
   applyChain(ctx, undefined)
@@ -1266,6 +1287,8 @@ test('分叉时把血缘边写进官方存储域（这是重启后关系不丢�
   assert.equal(written.base, '修 GUI 卡顿')
   assert.equal(written.title, '⑂1 修 GUI 卡顿')
   assert.equal(typeof written.createdAt, 'number')
+  // 触发指令也要落进去：页签上"这条分叉是为什么来的"全靠它（名字同族是一样的）。
+  assert.equal(written.trigger, '改成用 worktree 隔离')
 })
 
 test('**重启后**：内存记录为空，家族仍从持久化的边恢复出来（health.nodes 整棵树）', async () => {
@@ -1284,6 +1307,9 @@ test('**重启后**：内存记录为空，家族仍从持久化的边恢复出�
   assert.deepEqual(fromRoot.nodes.map(node => node.current), [true, false])
   assert.equal(fromRoot.nodes[1].title, '⑂1 修 GUI 卡顿')
   assert.equal(fromRoot.nodes[1].state, 'finished', '进程重启后 agent 不在了')
+  assert.equal(fromRoot.nodes[1].at, 1000, '分叉时刻来自落盘的边，不是内存记录')
+  assert.equal(fromRoot.nodes[1].ordinal, 1)
+  assert.equal(fromRoot.nodes[1].label, '修 GUI 卡顿', '旧边也剥得出显示名（顺序完全来自 title）')
 
   // 从**那条分叉**看：同一棵树，current 落在自己身上。
   const fromHead = await callHealth(calls.routes, 'sessionId=session-head-1')

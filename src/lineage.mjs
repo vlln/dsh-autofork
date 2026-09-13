@@ -78,6 +78,14 @@ export const lineageEdgeSchema = z.object({
   title: z.string(),
   /** 建分叉时间（epoch ms）。 */
   createdAt: z.number().int().nonnegative(),
+  /**
+   * **触发这次分叉的那条用户指令**（有界的一行文本）。
+   *
+   * 为什么存进边：它是「分叉」页签上唯一能让用户认出"这条分叉是为什么来的"的信息
+   * （名字只给了家族根的名字 + 序号，同族几条会长得一模一样）。可选，好让
+   * feature 之前写下的旧边照常读得回来。
+   */
+  trigger: z.string().optional(),
 })
 
 /**
