@@ -1,0 +1,53 @@
+{
+  "name": "@vlln/dsh-autofork",
+  "version": "0.1.0",
+  "description": "DSH 插件：自动分叉——用户在 running session 中提交新指令时自动 fork 出前台分叉，用确定性渲染补偿在飞 turn，后台分叉结束后回注结果。官方 bundle 插件，dsh plugin --profile web add github:vlln/dsh-autofork",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": {
+      "default": "./index.mjs"
+    },
+    "./client": "./client/index.js",
+    "./src/*": "./src/*",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client",
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "gate": "node scripts/gate.mjs",
+    "check": "node --check index.mjs && node --check src/digest.mjs && node --check src/params.mjs && node --check src/tools.mjs && node --check client/index.js",
+    "verify": "npm run check && npm run gate && npm test"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-bundle",
+    "deepseek-harness",
+    "agent",
+    "branch",
+    "automation"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  }
+}

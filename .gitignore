@@ -1,0 +1,7 @@
+# 依赖与本机私有上下文都不入库
+node_modules
+*.log
+.DS_Store
+
+# 本机私有上下文（含本机路径与环境事实）
+AGENTS.local.md

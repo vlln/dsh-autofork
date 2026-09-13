@@ -1,0 +1,4 @@
+# dsh-autofork：向组合挂 Node half（自动分叉：fork + digest 注入 + 结果回注 + 调度工具）
+- insert:
+    - id: dsh-autofork
+      name: '@vlln/dsh-autofork'
