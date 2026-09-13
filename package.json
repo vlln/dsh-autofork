@@ -1,7 +1,7 @@
 {
   "name": "@vlln/dsh-autofork",
   "version": "0.1.0",
-  "description": "DSH 插件：自动分叉——用户在 running session 中提交新指令时自动 fork 出前台分叉，用确定性渲染补偿在飞 turn，后台分叉结束后回注结果。官方 bundle 插件，dsh plugin --profile web add github:vlln/dsh-autofork",
+  "description": "DSH 插件：agent 忙时自动分叉会话 —— 你新发的指令立刻在新会话里得到响应，旧会话留在后台跑完并把结果回注。官方 bundle 插件，装：dsh plugin --profile web add github:vlln/dsh-autofork",
   "license": "MIT",
   "type": "module",
   "main": "index.mjs",
