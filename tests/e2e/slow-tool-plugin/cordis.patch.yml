@@ -1,0 +1,4 @@
+# E2E 专用：把慢工具挂进组合（制造"悬空工具调用"窗口）
+- insert:
+    - id: e2e-slow-tool
+      name: '@vlln/e2e-slow-tool'

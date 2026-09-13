@@ -25,8 +25,9 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "gate": "node scripts/gate.mjs",
-    "check": "node --check index.mjs && node --check src/digest.mjs && node --check src/params.mjs && node --check src/tools.mjs && node --check client/index.js",
-    "verify": "npm run check && npm run gate && npm test"
+    "check": "node --check index.mjs && node --check src/digest.mjs && node --check src/params.mjs && node --check src/tools.mjs && node --check src/lineage.mjs && node --check client/index.js",
+    "check:e2e": "node --check tests/e2e/drive.mjs && node --check tests/e2e/mock-server.mjs && node --check tests/e2e/verify-lineage.mjs && node --check tests/e2e/session-dir.mjs",
+    "verify": "npm run check && npm run check:e2e && npm run gate && npm test"
   },
   "keywords": [
     "dsh",

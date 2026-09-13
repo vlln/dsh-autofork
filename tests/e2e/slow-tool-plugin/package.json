@@ -1,0 +1,23 @@
+{
+  "name": "@vlln/e2e-slow-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "exports": {
+    ".": {
+      "default": "./index.mjs"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "cordis.patch.yml"
+  ]
+}

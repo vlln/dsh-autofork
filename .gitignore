@@ -5,3 +5,6 @@ node_modules
 
 # 本机私有上下文（含本机路径与环境事实）
 AGENTS.local.md
+
+# E2E 台的临时产物（work 目录下是会话 cwd，别入库）
+tests/e2e/work/

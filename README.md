@@ -41,7 +41,7 @@ dsh plugin --profile web add github:vlln/dsh-autofork
 ## 验证
 
 ```sh
-npm run verify     # 语法（5 文件）+ 3 道静态门禁 + 117 项自证测试
+npm run verify     # 语法（6 个发行文件 + 4 个 E2E 脚本）+ 3 道静态门禁 + 123 项自证测试
 ```
 
 | 层 | 证据 |
@@ -53,22 +53,27 @@ npm run verify     # 语法（5 文件）+ 3 道静态门禁 + 117 项自证测�
 | `npm run gate` 门禁 3 | **client bundle 契约**：调用 `__ModuleLoader__.load`、`id` 与包名一致、导出 `name`/`inject`/`apply` |
 | **挂载（真实实例）** | `DSH_HOME=/tmp/dsh-autofork-home dsh web --port 0 --no-open` → 无 `plugin tree failed to load`；health 探针 → `200 {"ok":true,"tools":[…],"params":{…25 项…},"nodes":[…]}` |
 | **client bundle（真实实例）** | boot payload 含 `{"id":"@vlln/dsh-autofork","url":"/plugins/??@vlln/dsh-autofork/client.js&rev=…"}`；该 URL → `200` / 28192 字节（含 `conversation.view` / `'分叉'`） |
-| **行为层（真实 harness）** | `dsh --profile sdk`（stdio JSON-RPC）+ 官方 `llm-mock-server`（**不需要模型凭据**）驱动一次真实对话：父分叉的 step 挂住 → 第二条指令到达 → `forkDetected / digestInjected / noticeInjected / instructionDelivered` **全为 true**，且父分叉仍在 `running` 时子分叉已 `running → idle` 完成响应；同一场景验证**分叉命名**：`title.assigned "⑂1 <根标题>"`，保留旧的 `⑂1`/`⑂2` 持久化会话后 → `"⑂3 …"` |
-| **血缘持久化（真实 harness，两进程）** | 进程 1 分叉 → 盘上出现 `storages/autofork_lineage/edges/<head>.json`；进程 2（全新实例）`lineage.opened {edges:1}` → health 从**根**与从**分叉**都返回同一棵 2 节点树（根的标题由孩子的 `base` 反推）；head 的一次真实 turn 里 `fork_list` 的 `tool/result` 渲染出 `↑ 我接管的` 与 `~ 同族的另一条分叉`（`isError:false` ⇒ 输出 schema 过关） |
+| **行为层（真实 harness）** | `dsh --profile sdk`（stdio JSON-RPC）+ 官方 `llm-mock-server`（**不需要模型凭据**）驱动一次真实对话：父分叉的 step 挂住 → 第二条指令到达 → `forkDetected / digestInjected / noticeInjected / instructionDelivered` **全为 true**，且父分叉仍在 `running` 时子分叉已 `running → idle` 完成响应；同一场景验证**分叉命名**：`title.assigned "⑂1 <根标题>"`（序号只来自持久化血缘表，`title.ordinal {max, next, lineage}` 三者一致） |
+| **血缘持久化（真实 harness，两进程）** | 进程 1（headless）分叉 → 盘上出现 `storages/autofork_lineage/edges/<head>.json`；进程 2（**全新 `dsh web` 实例**，随机端口）`GET /api/dsh-autofork/health?sessionId=<head>` 返回整棵树：根（标题由孩子的 `base` 反推）+ `⑂1 …`（`depth 1` / `parentId` / `current`）。同一场景里 head 的真实 turn 调 `fork_list`，`tool/result` 渲染出 `↑ 我接管的`（`isError:false` ⇒ 封闭的 `output.schema` 过得了运行时校验） |
 | 未验证（只能靠人眼） | **「分叉」页签是否真的出现在 tab 栏、点击是否真的切了会话**、**焦点是否真的切换**、转写是否连续、折叠是否真的折叠——服务端只能验到 bundle 200 + 事件形状 + `nodes` 的形状 |
 
 行为层证据跑在**已发布的 `dsh 0.1.2-rc.1`** 上（本机源码检出的 `node_modules` 不完整，未做基线 worktree 复验）。
 
-### 行为层复现（E2E 台不随包分发）
+### 行为层复现（台子在 [`tests/e2e/`](tests/e2e/README.md)，但不进 `npm run verify`）
 
-下面这套来自本机实验台（官方 `llm-mock-server` + `dsh --profile sdk` 的 stdio JSON-RPC 驱动），
-**不在本仓库里**——它需要官方 monorepo 的 mock server 源码，属于开发期设施。这里留下命令形状，便于日后重建。
+三个场景（忙时分叉 / 血缘跨进程 / 悬空工具调用两臂对照）与前置条件见
+[`tests/e2e/README.md`](tests/e2e/README.md)。**它不进 `npm test` 与 CI**，因为它需要一个
+**dsh 源码检出**：官方 mock LLM 在 `packages/test-support/llm-mock-server` 里，不在 npm 闭包中，
+要用 `DSH_MOCK_LLM_SERVER` 指路。命令形状：
 
 ```sh
-# 1) mock LLM（零依赖，OpenAI 兼容）
-cd <E2E 台目录> && MOCK_PORT=8123 node mock-server.mjs   # 见下注
-# 2) 驱动真实 harness
-DSH_AUTOFORK_DEBUG=/tmp/dsh-autofork-debug.log node drive.mjs
+export DSH_HOME=/tmp/dsh-autofork-e2e-home   # 先装：DSH_HOME=$DSH_HOME dsh plugin --profile sdk add .
+export DSH_MOCK_LLM_SERVER=/path/to/deepseek-harness/packages/test-support/llm-mock-server/lib/index.js
+
+# 终端 1：mock LLM（零依赖，OpenAI 兼容；stall 挂住旧会话的 step，success 回新会话）
+MOCK_PORT=8123 MOCK_SEQUENCE=stall,success node tests/e2e/mock-server.mjs
+# 终端 2：驱动真实 harness
+DSH_AUTOFORK_DEBUG=/tmp/dsh-autofork-debug.log node tests/e2e/drive.mjs
 ```
 
 `debugLogPath`（或环境变量 `DSH_AUTOFORK_DEBUG`）会逐行写下每条判定与早退原因——没有它，"为什么没分叉"在进程外完全不可见（每条早退分叉默认都是静默的）。
@@ -105,13 +110,14 @@ responding to each 'tool_call_id'. (insufficient tool messages following tool_ca
 `'immediate'` 保留为**对照臂**——它复现事故现场：
 
 ```sh
-bash e2e-dangling.sh       # 两臂对照：safe 臂镜像落在 tool/result 之后，immediate 臂落在中间
+bash tests/e2e/e2e-dangling.sh   # 两臂对照：safe 臂镜像落在 tool/result 之后，immediate 臂落在中间
 # safe      : toolCallSeq=20 toolResultSeq=26 firstMirrorSeq=31 → mirrorAfterToolResult=true
 # immediate : toolCallSeq=20 toolResultSeq=26 firstMirrorSeq=25 → mirrorAfterToolResult=false
 ```
 
 headless 下 `bash` 被本机沙箱拒绝并瞬间返回，造不出那段窗口，所以这个 E2E 用
-一个自建的 `slow_wait(ms)` 工具插件（在**进程内** sleep，不碰沙箱）——本仓库不随包分发这套 E2E 台。
+一个自建的 `slow_wait(ms)` 工具插件（在**进程内** sleep，不碰沙箱）——它就在
+[`tests/e2e/slow-tool-plugin/`](tests/e2e/slow-tool-plugin/)，同样不进 `npm run verify`。
 mock 不校验消息顺序，它复现的是"顺序被写坏"这个事实本身；真实 provider 才把它变成 400。
 
 ⚠️ **写坏是永久的。** surface 是追加有序的，"插错位置"这件事会被记进日志，之后**这条会话的
