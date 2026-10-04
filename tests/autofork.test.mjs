@@ -29,15 +29,15 @@ function sessionLog() {
     { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW - 600_000 },
     { seq: 1, type: 'user/message', surfaceOp: 'append', data: { id: 'm-log-1', role: 'user', content: [{ type: 'text', text: '原始指令' }], source: { kind: 'user' } }, time: NOW - 590_000 },
     { seq: 2, type: 'step/start', data: { turn: 1, step: 1 }, time: NOW - 580_000 },
-    { seq: 3, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { id: 'a-log-1', role: 'assistant', content: [{ type: 'text', text: '开始处理' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, time: NOW - 570_000 },
+    { seq: 3, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { id: 'a-log-1', role: 'assistant', content: [{ type: 'text', text: '开始处理' }], source: { kind: 'model', provider: 'p', model: 'm' } }, stream: [] }, time: NOW - 570_000 },
     { seq: 4, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{"file_path":"a.ts"}' }, time: NOW - 560_000 },
-    { seq: 5, type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1, message: { id: 't-log-1', role: 'user', source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'file body' }] }] } }, time: NOW - 550_000 },
+    { seq: 5, type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1, message: { id: 't-log-1', role: 'tool', toolCallId: 'c1', source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'file body' }] }] } }, time: NOW - 550_000 },
     { seq: 6, type: 'step/end', data: { turn: 1, step: 1 }, time: NOW - 540_000 },
     { seq: 7, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW - 530_000 },
     // ---- 在飞 turn ----
     { seq: 8, type: 'turn/start', data: { turn: 2 }, time: NOW - 70_000 },
     { seq: 9, type: 'step/start', data: { turn: 2, step: 1 }, time: NOW - 60_000 },
-    { seq: 10, type: 'assistant/message', surfaceOp: 'append', data: { turn: 2, step: 1, message: { id: 'a-log-2', role: 'assistant', content: [{ type: 'tool-call', id: 'c2', name: 'bash', arguments: '{"command":"npm test"}' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, time: NOW - 55_000 },
+    { seq: 10, type: 'assistant/message', surfaceOp: 'append', data: { turn: 2, step: 1, message: { id: 'a-log-2', role: 'assistant', content: [{ type: 'tool-call', id: 'c2', name: 'bash', arguments: '{"command":"npm test"}' }], source: { kind: 'model', provider: 'p', model: 'm' } }, stream: [] }, time: NOW - 55_000 },
     { seq: 11, type: 'tool/call', data: { turn: 2, step: 1, callId: 'c2', name: 'bash', arguments: '{"command":"npm test"}' }, time: NOW - 50_000 },
   ]
 }
@@ -382,13 +382,13 @@ test('running + 长 step + 有已完成 turn → 抢占消息、建分叉、注�
   assert.equal(calls.followups[0].message.id, 'm-user')
   assert.equal(calls.followups[0].agent, headId, '用户指令必须投给 head')
 
-  // 注入消息带 plugin source，不与人类发言混淆；并声明 notice 形态（客户端折叠成
-  // 一行摘要）。`summary` 必须存在且非空——客户端 `noticeSummary()` 对空串返回 null，
-  // 会静默退回整块呈现，等于这次折叠白设。
+  // 注入消息带**生产者自有**的 plugin source（会话格式 v4 要求 kind 非空且不是被退役的
+  // `plugin`；`plugin:<name>` 是第三方生产者的命名空间，见 PLUGIN_SOURCE 的注释），
+  // 不与人类发言混淆；并声明 notice 形态（客户端折叠成一行摘要）。`summary` 必须存在且
+  // 非空——客户端 `noticeSummary()` 对空串返回 null，会静默退回整块呈现，等于这次折叠白设。
   for (const entry of calls.injections) {
     const source = entry.message.source
-    assert.equal(source.kind, 'plugin')
-    assert.equal(source.plugin, 'dsh-autofork')
+    assert.equal(source.kind, 'plugin:dsh-autofork')
     assert.equal(source.form, 'notice')
     assert.equal(typeof source.summary, 'string')
     assert.ok(source.summary.length > 0 && source.summary.length <= 120, source.summary)
@@ -449,10 +449,67 @@ test('CAS 输掉（loop 已领取）→ 不建分叉，原投递语义生效', a
 test('消息来源不在 forkableSourceKinds → 不处理', async () => {
   const { ctx, calls, emitInsert } = harness()
   applyChain(ctx, undefined)
-  emitInsert({ ...userMessage('m-x'), source: { kind: 'plugin', plugin: 'other' } })
+  // 非人类来源的注入（会话格式 v4 里每条消息都带生产者自有的 kind，没有 `plugin` 兜底；
+  // `runtime-context` 就是 runtime context 注入在 v4 里的 kind）。
+  emitInsert({ ...userMessage('m-x'), source: { kind: 'runtime-context' } })
   await flush()
   assert.deepEqual(calls.removes, [])
   assert.deepEqual(calls.agentsCreate, [])
+})
+
+test('回归：插件产出的每条消息 source 都满足会话格式 v4 的"生产者自有 kind"', async () => {
+  // 判据复刻自 `dsh-session-format-v3-to-v4` 的 source admission（`assertV4SourceRowAdmission`
+  // → `source()`）：`kind` 必须是非空字符串，且**不得**是退役的 `plugin` —— 旧包装
+  // `{kind:'plugin', plugin:X}` 在 v4 上是硬拒绝（`format v4 message requires a
+  // producer-owned source kind`），会在消息落盘/采用那一行炸掉整条会话。
+  // 迁移器把旧包装改写成 `plugin:<X>`，所以插件现在直接写这个形状（新旧日志同一个来源标签）。
+  const collectSources = (calls) => [
+    ...calls.injections.map(entry => entry.message.source),
+    ...calls.followups.map(entry => entry.message.source),
+    ...calls.steers.map(entry => entry.message.source),
+    ...calls.requeued.map(entry => entry.message.source),
+    ...calls.appended
+      .filter(entry => entry.type === 'user/message' || entry.type === 'assistant/message')
+      .map(entry => (entry.type === 'user/message' ? entry.data.source : entry.data.message.source)),
+  ].filter(source => source !== undefined)
+
+  // ① 主路径（分叉 + 注入）：head 的注入行。
+  const main = harness()
+  applyChain(main.ctx, undefined)
+  main.emitInsert(userMessage())
+  await flush()
+  const mainSources = collectSources(main.calls)
+  assert.ok(mainSources.length > 0, '主路径必须产出消息（否则这条断言是空的）')
+  assert.ok(mainSources.some(source => source.kind === 'plugin:dsh-autofork'),
+    '插件注入行的 kind 必须是 plugin:dsh-autofork')
+
+  // ② 回注路径（实例产出 → 容器转写）：分叉答复行。
+  const mirror = harness()
+  applyChain(mirror.ctx, undefined)
+  mirror.emitInsert(userMessage())
+  await flush()
+  mirror.ctx.agents.get('session-parent').session.deriveMessages = safeMessages
+  const mirrorHeadId = mirror.calls.agentsCreate[0].sessionId
+  const mirrorHead = mirror.ctx.agents.get(mirrorHeadId)
+  mirrorHead.session.snapshotEvents = () => [
+    { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
+    { seq: 1, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '回归用回复' }] }, stream: [] }, time: NOW },
+    { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
+  ]
+  for (const handler of mirror.listeners.get('agent/status') ?? []) {
+    handler({ agent: mirrorHead, status: 'idle' })
+  }
+  await flush()
+  const mirrorSources = collectSources(mirror.calls)
+  assert.ok(mirrorSources.some(source => source.kind === 'fork-answer'),
+    '回注行的 kind 必须是 fork-answer')
+
+  for (const source of [...mainSources, ...mirrorSources]) {
+    assert.equal(typeof source.kind, 'string', `source.kind 必须是字符串：${JSON.stringify(source)}`)
+    assert.ok(source.kind.length > 0, 'source.kind 不得为空')
+    assert.notEqual(source.kind, 'plugin', 'v4 拒绝退役的 plugin 包装（旧形状会让这条消息的日志打不开）')
+    assert.equal(source.plugin, undefined, '生产者的名字由 kind 承载，不再有 plugin 字段')
+  }
 })
 
 test('没有已完成的 turn（第一个 turn 还在跑）→ **空 seed**，在飞内容只由 digest 承载', async () => {
@@ -748,7 +805,6 @@ test('实例转 idle + 容器 surface 无悬空调用 → 回复被 append 进�
   // summary 必须**承载回复要点**——折叠行是用户不展开就能读到的唯一一行，
   // 只写"某实例已回复"会把"谁在回答我、说了什么"两件事都丢掉。
   assert.equal(mirrored[0].data.source.kind, 'fork-answer')
-  assert.equal(mirrored[0].data.source.plugin, 'dsh-autofork')
   assert.equal(mirrored[0].data.source.form, 'notice')
   assert.match(mirrored[0].data.source.summary, /^分叉会话 [0-9a-f]{8}：容器里应该看到这句$/)
 })
@@ -761,7 +817,7 @@ test('noticeSummaries=false → 注入消息退回整块呈现（不带 form/sum
   ctx.agents.get('session-parent').session.deriveMessages = safeMessages
 
   for (const entry of calls.injections) {
-    assert.deepEqual(entry.message.source, { kind: 'plugin', plugin: 'dsh-autofork' })
+    assert.deepEqual(entry.message.source, { kind: 'plugin:dsh-autofork' })
   }
 
   const headId = calls.agentsCreate[0].sessionId
@@ -1635,7 +1691,7 @@ test('容器模式：没有用户消息可答的 pre-step 被 reject；有的则
   // 而它们全都显式短路 reject。
   assert.deepEqual(await run([]), { kind: 'reject' },
     '没有用户消息可答时必须 reject')
-  assert.deepEqual(await run([{ id: 'ctx', role: 'user', content: [{ type: 'text', text: 'ctx' }], source: { kind: 'plugin', plugin: 'x' } }]),
+  assert.deepEqual(await run([{ id: 'ctx', role: 'user', content: [{ type: 'text', text: 'ctx' }], source: { kind: 'runtime-context' } }]),
     { kind: 'reject' }, '只有注入上下文、没有用户消息时同样 reject')
 
   // ② **有用户消息 ⇒ 放行**：笔记定的规则是"正常的一次 agent 反馈后的用户指令不会 branch,

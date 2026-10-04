@@ -16,9 +16,8 @@
  *
  * ## 它做什么
  *
- * 填 `conversation.session.header.utilities` 槽（会话头部常驻），显示两个方向的关系：
- *  - 本会话**分出去**的分叉：`⇄ N 条后台分叉`，展开可逐条跳转；
- *  - 本会话**自己是**分叉：`← 分叉自 …`，可跳回前台。
+ * 注册 `conversation.view` 里一个「分叉」页签（与「对话」「轨迹」并列），画本会话所在的
+ * 分叉家族：每条会话一行（名字 / 状态 / 触发指令 / 分叉时刻），点一行跳到那条会话。
  *
  * 状态来自对 `/api/dsh-autofork/health` 的轮询（同一个轮询顺带完成焦点交付）。
  * 组件不依赖槽位 props（从本模块的 store 读），把契约风险压到最小。
@@ -37,13 +36,18 @@ window.__ModuleLoader__.load({
     exports.name = 'dsh-autofork-client'
 
     /**
-     * 需要的客户端服务：会话状态（`open` / `openSubagent`）与槽位。
+     * 需要的客户端服务：
+     *  · `sessions` —— 列表快照（`list`）、子会话地址（`subagentAddress`）、投影刷新
+     *    （`refreshProjections`）与列表刷新（`refresh`）；
+     *  · `uiWorkspace` —— **切换当前会话的唯一入口**（`openSession(target)`，见下）；
+     *  · `slots` —— 注册「分叉」页签。
      *
-     * **不要再声明 `uiWorkspace`**：它不提供切会话能力（切会话的正解是
-     * `ctx.sessions.open(id)` / `openSubagent(address)`，见下）。声明它只会让
-     * "服务缺席就整个客户端插件不加载"这条严格注入规则多一个无谓门槛。
+     * `uiWorkspace` 必须声明：0.2.0 起 `sessions` 服务只负责"目录与引用"，会话选择属于
+     * 视图所有者（`dsh-client-ui-workspace` 的 UiWorkspaceService），导航动作在
+     * `openSession`。服务缺席时本插件做不到"把用户切到分叉上"，与其静默失效不如让
+     * 严格注入规则把整个客户端条目拦住（web 组合里 ui-workspace 恒在）。
      */
-    exports.inject = ['sessions', 'slots']
+    exports.inject = ['sessions', 'uiWorkspace', 'slots']
 
     var React = require('react')
 
@@ -467,106 +471,99 @@ window.__ModuleLoader__.load({
     exports.apply = function (ctx) {
       var sessions = ctx.get('sessions')
       var slots = ctx.get('slots')
+      var uiWorkspace = ctx.get('uiWorkspace')
       if (sessions === undefined) return
 
       /**
-       * 切到另一条会话。**只有 `sessions.open(id)` 这一条路。**
+       * 切到另一条会话。**唯一入口是 `ctx.uiWorkspace.openSession(target)`。**
        *
-       * 实测踩过两轮：`uiWorkspace` 上**根本没有**打开会话的方法——运行时探到的形状是
-       * `own=[ctx|name|directoryPicker|workspaces|sessions|connecting]`
-       * `proto=[constructor|connectWorkspace|startSession|archiveSession|pickDirectory|listDirectory|createDirectory|watchNavigation|clearArchivedCurrent]`，
-       * 调 `openSession` 抛 `TypeError: uiWorkspace.openSession is not a function`
-       * （决策日志里的 `nav.threw` / `openSession.threw`）。官方客户端里的正解是
-       * `ui-workflow-run` 的用法：`ctx.sessions.open(id)`。
+       * 0.2.0 起 `ctx.sessions` 只剩"目录 + 引用"（`ISessions` 的文档原话：*Host catalog and
+       * local reference-source counts; navigation belongs to view owners*）——`open` /
+       * `openSubagent` / `refreshSubagents` 都已不存在。会话选择归视图所有者
+       * （`dsh-client-ui-workspace` 的 `UiWorkspaceService`），导航动作是
+       * `openSession(target: SessionTarget)`，`target` 是 session id **或** durable 子会话地址
+       * （`SessionId | SubagentAddress`）；官方 `ui-subagent` 跳子会话也是这么调的。
        *
-       * 仍然**在调用点**读 `sessions.open`，不在 apply 时把它抓成闭包变量：服务可能在
-       * 插件 apply 之后才挂上，缓存引用会拿到陈旧的空对象。
+       * 在调用点读服务（不在 apply 时把方法抓成闭包变量）：服务可能在 apply 之后才挂上。
        */
-      var openSession = function (sessionId) { return sessions.open(sessionId) }
+      function openSession(target) {
+        if (uiWorkspace === undefined || typeof uiWorkspace.openSession !== 'function') {
+          report('nav.no-service: uiWorkspace.openSession 不可用')
+          return
+        }
+        uiWorkspace.openSession(target)
+      }
 
       /**
-       * 从**已加载的 catalog** 派生一条子会话的 durable 父地址。
+       * 当前**正在显示的**会话 id。
        *
-       * 形状逐字对齐官方 `ui-subagent` 的调用点：
-       * `openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode })`，
-       * 条目取 `sessions.list` 快照里的 `subagentsByParent[parentId].entries`
-       * （客户端把 manager 的 catalogs 投影到那里）。
+       * 0.2.0 的列表快照里没有 `current` 字段了（`SessionListState` = `{ids, byId, phase,
+       * projectionsBySession}`）。"主视图选中了谁"由引用计数表达：`ui-workspace` 用
+       * `sessions.retain(target, { source: 'mainView' })` 持有当前会话，于是那一行的
+       * `retainedBy.mainView > 0`——这正是官方 `ui-session` 内部判 `isMain()` 的写法：
+       * `list.getSnapshot().byId[sessionId]?.retainedBy.mainView > 0`。
        *
-       * ⚠️ **不要找 `sessions.navigationAddress`**：那个方法在 `SessionManager` 上，
-       * **没有**暴露到 `sessions` 服务（服务上只有 `open` / `openSubagent` /
-       * `subagentAddress` / `setSubagentCatalogOpen` / `refreshSubagents` …）。
-       * 上一版就是这么写的 ⇒ `typeof … === 'function'` 恒为 false ⇒ 静默退回 `open(id)` ⇒
-       * 宿主按设计拒绝 subagent 会话。决策日志里只有一行
-       * `nav.plain: … (no subagent address)`——看起来像"还没准备好"，其实判据取错了对象。
-       *
-       * @param {string} childId 子会话 id。
-       * @param {string|undefined} parentId 已知的直接父会话（优先用它）。
-       * @returns {object|undefined} `{parentSessionId, childSessionId, mode}` 或 undefined。
+       * @returns {string|undefined} 当前会话 id。
        */
-      function deriveSubagentAddress(childId, parentId) {
-        // 1) 客户端已经保留过的地址（官方也先看这个）。
-        try {
-          if (typeof sessions.subagentAddress === 'function') {
-            var retained = sessions.subagentAddress(childId)
-            if (retained !== undefined && retained !== null) return retained
-          }
-        } catch (error) {
-          report('nav.retained-threw: ' + String(error))
-        }
-        // 2) 从已加载的 catalog 条目派生。
+      function currentSessionId() {
         var snap = sessions.list.getSnapshot()
-        var catalogs = snap === undefined || snap === null || snap.subagentsByParent === undefined
-          ? {}
-          : snap.subagentsByParent
-        var parents = parentId !== undefined && parentId !== null
-          ? [parentId]
-          : Object.keys(catalogs)
-        for (var index = 0; index < parents.length; index += 1) {
-          var catalog = catalogs[parents[index]]
-          var entries = catalog === undefined || catalog === null || !Array.isArray(catalog.entries)
-            ? []
-            : catalog.entries
-          for (var entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
-            var entry = entries[entryIndex]
-            if (entry !== null && entry !== undefined && entry.kind === 'child' && entry.id === childId) {
-              return { parentSessionId: parents[index], childSessionId: childId, mode: entry.mode }
-            }
-          }
+        var rows = snap === undefined || snap === null ? undefined : snap.byId
+        if (rows === undefined || rows === null) return undefined
+        var ids = Object.keys(rows)
+        for (var index = 0; index < ids.length; index += 1) {
+          var row = rows[ids[index]]
+          var retained = row === undefined || row === null ? undefined : row.retainedBy
+          if (retained !== undefined && retained !== null && (retained.mainView ?? 0) > 0) return ids[index]
         }
         return undefined
       }
 
       /**
+       * 一条子会话的 durable 父地址（形状 `{parentSessionId, childSessionId, mode}`）。
+       *
+       * 数据源是 `sessions.subagentAddress(childId)`：它先看客户端**已保留/已解析**的地址，
+       * 再扫各会话已加载的 `subagentCatalog` 投影。投影没加载时返回 undefined——所以调用方
+       * 先 `refreshProjections(parentId)`（见 `openAddressed`）。
+       *
+       * @param {string} childId 子会话 id。
+       * @returns {object|undefined} 地址，或 undefined（不是子会话 / catalog 还没加载）。
+       */
+      function subagentAddressOf(childId) {
+        try {
+          if (typeof sessions.subagentAddress !== 'function') return undefined
+          var address = sessions.subagentAddress(childId)
+          return address === undefined || address === null ? undefined : address
+        } catch (error) {
+          report('nav.address-threw: ' + String(error))
+          return undefined
+        }
+      }
+
+      /**
        * 打开一条会话，**按它的寻址方式**打开。
        *
-       * 实测踩到的坑（用户 2026-09-11 报的 `历史加载失败：subagent Sessions require their
-       * durable parent address（session/agent-busy）`）：`origin:'subagent'` 的会话**不能**用
-       * 普通 session 地址打开——宿主 `validateAddress()` 对 `address.kind === 'session'`
-       * 且 `header.origin === 'subagent'` 直接抛 `session/agent-busy`。
-       * 正确姿势是 `sessions.openSubagent({parentSessionId, childSessionId, mode})`，
-       * 且必须**已从父会话的 catalog 派生**（`selectSubagent` 会校验条目存在且 mode 一致）。
-       *
-       * 顺序：`refreshSubagents(parentSessionId)`（拉父会话 catalog，复用 in-flight）→
-       * 派生地址 → `openSubagent(address)`；派生不到才退回 `open(id)`。
+       * subagent 会话（容器模式下的分叉会话）不能用普通 session 地址打开——宿主
+       * `validateAddress()` 对 `address.kind === 'session'` 且 `header.origin === 'subagent'`
+       * 直接抛 `session/agent-busy`。所以先 `refreshProjections(parentSessionId)` 把父会话的
+       * 投影（含 `subagentCatalog`）拉进客户端，再 `subagentAddress(childId)` 派生地址；
+       * 派生得到就把**地址**交给 `openSession`（`SessionTarget` 允许地址），否则按普通
+       * 顶层会话开。扁平分叉（默认）的 head 本来就是普通会话，走的就是后者。
        *
        * @param {string} sessionId 目标会话。
        * @param {string|undefined} parentSessionId 已知的直接父会话（分叉交付时服务端会给）。
        * @returns {Promise<void>} 打开完成。
        */
       function openAddressed(sessionId, parentSessionId) {
-        var listState = sessions.list.getSnapshot()
-        var anchor = parentSessionId !== undefined
-          ? parentSessionId
-          : (listState === undefined || listState === null ? undefined : listState.current)
-        var loadCatalog = anchor === undefined || typeof sessions.refreshSubagents !== 'function'
+        var anchor = parentSessionId !== undefined ? parentSessionId : currentSessionId()
+        var loadProjections = anchor === undefined || typeof sessions.refreshProjections !== 'function'
           ? Promise.resolve()
-          : Promise.resolve(sessions.refreshSubagents(anchor)).catch(function (error) {
+          : Promise.resolve(sessions.refreshProjections(anchor)).catch(function (error) {
             report('catalog.refresh-failed: ' + String(error))
           })
-        return loadCatalog.then(function () {
-          var address = deriveSubagentAddress(sessionId, parentSessionId)
-          if (address !== undefined && typeof sessions.openSubagent === 'function') {
-            sessions.openSubagent(address)
+        return loadProjections.then(function () {
+          var address = subagentAddressOf(sessionId)
+          if (address !== undefined) {
+            openSession(address)
             report('nav.subagent: ' + sessionId + ' via ' + String(address.parentSessionId)
               + ' mode=' + String(address.mode))
             return
@@ -632,7 +629,11 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 交付一条分叉：先刷新列表，再切焦点，**验证 current 真的变了**才 ack。
+       * 交付一条分叉：先刷新列表，再切焦点，**验证真的切过去了**才 ack。
+       *
+       * 验证读的是"当前显示的是哪条会话"（`retainedBy.mainView`，见 `currentSessionId`）——
+       * `uiWorkspace.openSession` 是同步发起、异步打开的，只有这一读能确认它落地了。
+       * 没切成就不 ack，下次轮询服务端会再提供同一条，自动重试。
        * @param {string} branchId 目标分叉 session id。
        */
       function deliver(branchId, parentSessionId) {
@@ -646,8 +647,7 @@ window.__ModuleLoader__.load({
             report('openSession.threw: ' + String(error) + ' || ' + shapeOf('sessions', sessions))
           })
           .then(function () {
-            var after = sessions.list.getSnapshot()
-            var current = after === undefined || after === null ? undefined : after.current
+            var current = currentSessionId()
             if (current === branchId) {
               report('handoff.delivered: ' + branchId)
               fetch(HEALTH_PATH + '?client=1&ack=' + encodeURIComponent(branchId), {
@@ -706,8 +706,7 @@ window.__ModuleLoader__.load({
       /** 按当前会话取一次数据。 */
       function tick() {
         if (stopped) return
-        var snap = sessions.list.getSnapshot()
-        var current = snap === undefined || snap === null ? undefined : snap.current
+        var current = currentSessionId()
         if (current === undefined || current === null) {
           publish({ current: undefined, nodes: [], driver: null })
           return

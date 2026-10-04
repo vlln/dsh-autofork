@@ -170,10 +170,28 @@ mock 不校验消息顺序，它复现的是"顺序被写坏"这个事实本身�
 | 触发事件 | `agent/inbox/inserted`（DSH core 事件；消息进入 agent inbox 时发出） |
 | 抢占原语 | `agent.inbox.remove(messageId): boolean`——抢到才分叉，抢不到即让原 steer/queue 生效 |
 | 切点读取 | `TurnBoundaryProjection`（key `turnBoundary`，由 `dsh-agent-loop` 注册） |
-| 建分叉 | `ctx.agents.create({ seed, inheritedEventCount, meta, setup })` |
+| 建分叉 | `ctx.agents.create({ seed, inheritedEventCount, meta, setup })` → `AgentHandle`（`agent` + `dispose()`） |
 | 子分叉组合 | `ctx.agentPresets.composeFrom(agentCtx, parentCtx)`——加入父分叉同一份 standing composition |
 | 上下文注入 | `agent.inject(UserMessage)`（不唤醒）+ `agent.followup(UserMessage)`（唤醒） |
 | 回注触发 | 子分叉 `agent/status` 转 `idle` |
+
+### 消息形状（会话格式 v4 的硬要求）
+
+插件往日志里写的每一条消息都必须过 v4 的采用校验，下面几条是踩过／核过的：
+
+- **`source.kind` 必须是"生产者自有的 kind"**：非空字符串，且**不得**是退役的 `plugin`
+  （v4 的 `source()` 对 `kind === 'plugin'` 直接抛 `format v4 message requires a
+  producer-owned source kind`）。第三方生产者的命名空间是 `plugin:<name>`，所以本插件的注入行
+  写 `{kind:'plugin:dsh-autofork'}`——这也是 v3→v4 迁移器对**旧日志**里
+  `{kind:'plugin', plugin:'dsh-autofork'}` 的改写结果，新旧日志因此显示同一个来源标签；
+  分叉答复行另用 `{kind:'fork-answer'}`（同样是自有 kind，标签更好读）。
+- **`assistant/message` 必带 `stream`**（`AssistantStreamRecord[]`）：缺了它 `Session.create`
+  会在下一次读取这条日志时抛 `seed assistant/message … has invalid settlement fields`
+  ——也就是说**会话再也打不开**。插件合成的一等回复没有模型分片流，写 `stream: []`。
+- **`tool/result` 的 message 必须是 `role:'tool'` 且带顶层 `toolCallId`**（v4 起；
+  v3 里它的 role 是 `'user'`）。插件判"悬空工具调用"仍然只认 `source.kind === 'tool'` +
+  `source.callId`——`source` 是两代日志都成立的那条配对事实。
+- `subagent/descriptor`（version 3）/ `subagent/catalog`（version 0）的形状未变。
 
 ## 容器形态（默认）：**同一个容器**，忙时才分叉
 
@@ -232,7 +250,7 @@ runtime context / skill catalog 使消息表非空 ⇒ 它会自己发一个真�
 1. 用户的消息在旧会话（下称 A）的 inbox 里被 `inbox.remove()` **CAS 抢下**，投给新建的 head（B）
    ——A 从头到尾**没被中止**，它的在飞 turn / step 原样继续；
 2. **B 用 A 的历史做 seed**，所以客户端的焦点切到 B 之后，转写是**连续的**（见「seed 只继承**已完成**的部分」）；
-3. 客户端（本插件的 client half）在 1 秒内看到 `handoff`，调 `sessions.open(B)` 把用户切到 B 并 ack；
+3. 客户端（本插件的 client half）在 1 秒内看到 `handoff`，调 `uiWorkspace.openSession(B)` 把用户切到 B 并 ack；
    切不过去就下次重试（两阶段交付，见「交付是两阶段的」）；
 4. A 跑完后，它的最后一条回复被转给 B——**B 是用户面对的那条，所以是 B 讲给用户听**；
    同一份产出也回灌进 A 的日志（`mirrorInstanceReply`），点回 A 也能看到完整经过。
@@ -296,13 +314,20 @@ header: {parentSession: '…', seedLength: 5, origin: 'subagent'}
 
 **② 父会话日志里要有 `subagent/catalog`**（容器模式下才需要；见上面「容器形态」）。
 
-**③ 客户端必须用 `openSubagent(address)` 打开它，不能用 `open(id)`**：
+**③ 客户端必须把**地址**交给 `uiWorkspace.openSession(target)`，不能只给 session id**：
 宿主对 `address.kind === 'session'` 且 `header.origin === 'subagent'` 的请求**直接拒**
-（就是那个报错）。地址形如 `{parentSessionId, childSessionId, mode}`，且必须从**父会话的
-catalog** 派生——`selectSubagent()` 会校验 catalog 里有同 id、同 mode 的 child 条目。
-因此客户端 `openAddressed()` 的顺序是：`refreshSubagents(parentSessionId)` →
-`navigationAddress(id)` → `openSubagent(address)`，派生不到才退回 `open(id)`。
-服务端的 `handoff` 因此必须带 `parentSessionId`，否则客户端拿不到父会话的 catalog。
+（就是那个报错）。`SessionTarget = SessionId | SubagentAddress`，地址形如
+`{parentSessionId, childSessionId, mode}`，由 `sessions.subagentAddress(childId)` 派生
+（它先看已保留的地址，再扫各会话已加载的 `subagentCatalog` 投影）——投影没加载时返回
+undefined，所以要先 `sessions.refreshProjections(parentSessionId)` 把父会话的投影拉进来。
+因此客户端 `openAddressed()` 的顺序是：`refreshProjections(parentSessionId)` →
+`subagentAddress(id)` → `uiWorkspace.openSession(address)`，派生不到才退回
+`uiWorkspace.openSession(id)`。
+服务端的 `handoff` 因此必须带 `parentSessionId`，否则客户端不知道刷新谁的投影。
+
+**注**：0.2.0 起 `ctx.sessions` 只剩"目录 + 引用"（`open` / `openSubagent` /
+`refreshSubagents` 都已移除），会话选择归视图所有者——导航唯一入口是
+`ctx.uiWorkspace.openSession(target)`。
 
 ### head 是**普通顶层会话**（扁平，不挂子会话）
 
@@ -517,15 +542,17 @@ A ←── 接管 ── B ←── 接管 ── C
 
 第一版监听 `sessions.list` 里新出现的会话再回查路由。**实测两次失败**，两次的根因不同：
 
-1. 启动押在 `sessions.list.subscribe` 上，而**页面在"尚无当前会话"时加载、之后选中会话并不触发该回调** → 轮询一次都没跑（决策日志里 `slot.mounted` 有、`health.request` 为 0）。改为**无条件定时 tick**，每次重读 `current`。
-2. 交付送达、`openSession` 被调用，却抛 `TypeError: uiWorkspace.openSession is not a function` —— 取服务的方式不对。所有能正常工作的插件都用**属性访问** `ctx.uiWorkspace.…`；改为属性访问且**在调用点取**（不在 apply 时捕获）。
+1. 启动押在 `sessions.list.subscribe` 上，而**页面在"尚无当前会话"时加载、之后选中会话并不触发该回调** → 轮询一次都没跑（决策日志里 `slot.mounted` 有、`health.request` 为 0）。改为**无条件定时 tick**，每次重读当前会话。
+2. 切会话的动作取错了服务：导航现在**只在 `ctx.uiWorkspace.openSession(target)` 上**（`ctx.sessions` 已不含任何导航方法）。服务一律**在调用点**用属性读（不在 apply 时捕获）：服务可能在 apply 之后才挂上，缓存引用会拿到陈旧的空对象。
 
 现在依赖只剩"HTTP 能通"，且所有客户端失败都会经 `?note=` 回报到决策日志——客户端 half 不再是黑盒。
 
 ### 交付是两阶段的
 
-`consume=1` 只**提供候选**、不清标记；客户端切换成功并**确认 `current` 真的变了**之后才
-用 `ack` 清除。切换失败不 ack，下次轮询服务端会再提供同一条，自动重试。
+`consume=1` 只**提供候选**、不清标记；客户端切换成功并**确认"当前显示的会话"真的变成了目标**
+（读列表快照里该行的 `retainedBy.mainView`——`ui-workspace` 用 `source:'mainView'` 保留当前会话，
+这也是官方 `ui-session` 判 `isMain()` 的写法）之后才用 `ack` 清除。切换失败不 ack，下次轮询服务端
+会再提供同一条，自动重试。
 
 ### 回注方向
 

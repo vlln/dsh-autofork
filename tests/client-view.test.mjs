@@ -114,6 +114,28 @@ test('页签渲染：触发指令、相对时间、状态、我在哪——都�
   }
 })
 
+test('跳转：点一行走 `uiWorkspace.openSession`（0.2.0 的导航入口）', async () => {
+  // 0.2.0 起 `ctx.sessions` 不再有 `open` / `openSubagent`（导航属于视图所有者），
+  // 唯一入口是 `ctx.uiWorkspace.openSession(target)`。桩里没有旧方法，所以只要代码还在
+  // 走旧路径，这里就会抛 TypeError / 记不到目标。
+  const view = await mountView({
+    current: 'session-root-000001',
+    nodes: [
+      node({ sessionId: 'session-root-000001', current: true }),
+      node({ sessionId: 'session-head-000002', title: '⑂1 修 GUI 卡顿', depth: 1, current: false, parentId: 'session-root-000001' }),
+    ],
+  })
+  try {
+    view.rows[1].props.onClick()
+    // navTo 的链路是 promise（refresh → 拉投影 → 打开），等它落到 openSession。
+    for (let i = 0; i < 4; i += 1) await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(view.opened, ['session-head-000002'], '点分叉行必须把目标交给 uiWorkspace.openSession')
+    assert.equal(view.rows[1].props['aria-current'], undefined, '非当前行不带 aria-current')
+  } finally {
+    view.stop()
+  }
+})
+
 test('页签渲染：旧边（没有 trigger / at）只显示会话坐标，不渲染空标签或 undefined', async () => {
   // 这是"升级前落盘的边"与"家族根"的共同形状：只有 sessionId/title/state。
   const view = await mountView({

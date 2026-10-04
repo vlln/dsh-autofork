@@ -195,7 +195,10 @@ test('注入上下文（skill 目录 / runtime context）只留紧凑标记，�
     { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '真正的人类指令' }] } },
     // 一份巨大的系统注入：实测里它能把整条 digest 的预算吃光
     { seq: 2, type: 'user/message', data: { source: { kind: 'skill-catalog' }, content: [{ type: 'text', text: 'x'.repeat(20000) }] } },
-    { seq: 3, type: 'user/message', data: { source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, content: [{ type: 'text', text: 'y'.repeat(20000) }] } },
+    // runtime context 注入：v3 日志里它是 `{kind:'plugin', plugin:'@deepseek-ai/dsh-system-prompt'}`，
+    // 会话格式 v4 把它改写/写作生产者自有的 `runtime-context`（digest 只看"是不是 user"，
+    // 两种形状都必须被当成注入、不进固定保留区）。
+    { seq: 3, type: 'user/message', data: { source: { kind: 'runtime-context' }, content: [{ type: 'text', text: 'y'.repeat(20000) }] } },
     { seq: 4, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c', name: 'read', arguments: '{}' } },
   ]
   const { pinned, flow } = renderEventLines(events, DEFAULT_PARAMS)
@@ -204,7 +207,7 @@ test('注入上下文（skill 目录 / runtime context）只留紧凑标记，�
     '只有人类消息进固定保留区')
   const joined = flow.join('\n')
   assert.match(joined, /\[注入上下文 skill-catalog\]/)
-  assert.match(joined, /\[注入上下文 @deepseek-ai\/dsh-system-prompt\]/)
+  assert.match(joined, /\[注入上下文 runtime-context\]/)
   assert.ok(!joined.includes('xxxx'), '注入正文不得进入 digest')
 })
 

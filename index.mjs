@@ -97,8 +97,21 @@ const SUBAGENT_DESCRIPTOR_VERSION = 3
 const SUBAGENT_CATALOG_VERSION = 0
 
 
-/** 注入上下文消息的生产者标识（MessageSourceMap.plugin.plugin）。 */
-const PLUGIN_SOURCE = { kind: 'plugin', plugin: 'dsh-autofork' }
+/**
+ * 注入上下文消息的**生产者标识**（消息 source 的 kind）。
+ *
+ * 会话格式 v4 要求每条消息的 `source.kind` 是"生产者自有的 kind"——非空字符串且不得为
+ * `plugin`（`dsh-session-format-v3-to-v4` 的 `source()`：`kind === 'plugin'` 直接抛
+ * `format v4 message requires a producer-owned source kind`；`dsh-llm` 的
+ * `MessageSourceMap` 也写明"没有共享的 `plugin` 兜底 kind"）。v4 里第三方生产者的
+ * 命名空间就是 `plugin:<name>`：同一份 v3→v4 迁移器把**旧日志**里的
+ * `{kind:'plugin', plugin:X}` 改写成 `{kind:'plugin:' + X}`（见 `producerKind()`），
+ * 所以用这个字面量能让新旧日志里同一插件的注入行显示同一个来源标签。
+ *
+ * 呈现：客户端 `contextProducer()` 对未知 kind 直接用 kind 当标签，所以这一行显示
+ * `plugin:dsh-autofork`。(会话内的分叉答复另有 `fork-answer`，见 `appendAnswerNotice`。)
+ */
+const PLUGIN_SOURCE = { kind: 'plugin:dsh-autofork' }
 
 /**
  * 插件入口。
@@ -117,14 +130,16 @@ export function apply(ctx, config) {
    * 决定怎么显示的东西。给 `source` 加上 `form:'notice'` + `summary` 后，客户端
    * （`ui-chat` 的 `contextBody`）会把这一行**折叠成一行摘要**、展开才显示正文；
    * 正文一个字都不变，`source` 根本不进 `deriveMessages()` 的投影。依据：
-   * `dsh-llm` 的 `MessageSourceMap.plugin` 混入 `ContextFormed`，`notice` 要求
-   * 同时给出 `summary`，并有 `CONTEXT_SUMMARY_MAX_CHARS` 上限。
+   * `dsh-llm` 的 `ContextFormed` 声明了 `{form:'notice', summary}`（`ContextForm`
+   * 取值域里 notice = "刚发生的一件事的一行 account"），`summary` 非空才生效，
+   * 并有 `CONTEXT_SUMMARY_MAX_CHARS`（120）上限。
    *
    * 定义在 `apply` 内部而不是模块级：是否折叠由**运行期参数** `noticeSummaries`
    * 决定，而参数只在 `apply` 里解析。
    *
    * @param {string} text 消息正文（模型读到的内容）。
    * @param {string} [summary] 折叠行显示的一行 account；省略则不折叠。
+   * @param {string} [kind] 覆盖 source kind（如 `fork-answer`）；省略用 {@link PLUGIN_SOURCE}。
    * @returns {import('@deepseek-ai/dsh-llm').UserMessage} 构造好的 user 角色消息。
    */
   function contextMessage(text, summary, kind) {
@@ -1320,6 +1335,11 @@ export function apply(ctx, config) {
    * 为什么合法：`assistant/message` 的不变量是"turn/step 必须与开着的那个一致"
    * （`requireOpenStep`），并不要求这个 step 由谁开启。所以往 A 的 step 里写是合法的。
    * 为什么只在"无悬空工具调用"时做：见 {@link hasDanglingToolCall}（事实 13）。
+   *
+   * `stream: []` 是本格式要求的字段（v4 的 `assistant/message` 携带 `stream:
+   * AssistantStreamRecord[]`，即"精确的分片流"）。这条消息由插件合成、没有模型分片流，
+   * 空数组就是"没有捕获到流"的诚实表示；缺了它 `Session.create` 会在**下一次**读取
+   * 这条日志时抛 `invalid settlement fields`（种子/恢复边界），会话就此打不开。
    * @param {any} session 容器 session。
    * @param {any} instance 产出这条答复的 agent。
    * @param {{turn: number, step: number}} open 开着的 step 编号。
@@ -1340,6 +1360,7 @@ export function apply(ctx, config) {
             model: selection?.model ?? 'instance',
           },
         }),
+        stream: [],
       }, { surfaceOp: 'append' })
       return true
     } catch (error) {
@@ -1453,6 +1474,9 @@ export function apply(ctx, config) {
             model: selection?.model ?? 'instance',
           },
         }),
+        // 合成消息没有模型分片流；`stream` 是 v4 `assistant/message` 的必填字段
+        // （见 appendAnswerIntoStep 的注释：缺了它这条日志之后会打不开）。
+        stream: [],
       }, { surfaceOp: 'append' })
       container.session.append('step/end', { turn, step })
       container.session.append('turn/end', { turn, reason: { kind: 'completed' } })
@@ -1608,8 +1632,9 @@ export function apply(ctx, config) {
       maxChars: params.reInjectMaxChars,
     })
     // `kind: 'fork-answer'`：行的来源标签由客户端取 `source.kind` 显示（未知 kind 按原样
-    // 显示，见 `contextProvenance` 的 default 分叉），所以这一改让那一行不再写着泛化的
-    // 插件名 `dsh-autofork`，而是它真实的身份——一条**分叉答复**。
+    // 显示，见 `contextProducer` 的 default 分叉），所以这一改让那一行不再写着泛化的
+    // 插件名，而是它真实的身份——一条**分叉答复**。它同时满足 v4 的"生产者自有 kind"
+    // 要求（非空、且不是被退役的 `plugin`）。
     //
     // 为什么不做成"一等 assistant 回复"：客户端里 `user/message` 由 ui-chat 的
     // `input-message` 定义**独占**渲染（它按 `source.kind` 内部分叉），而事件派发是
@@ -1650,11 +1675,11 @@ export function apply(ctx, config) {
    *   · 它没有 tool-call 部件 → 在它后面追加 user/message 合法；
    *   · 它有 → 查它**之后**有没有工具结果消息按 `source.callId` 应答。
    *
-   * ⚠️ **工具结果消息的 `role` 是 `'user'`，不是 `'tool'`**（用户实测的落盘日志里
-   * `tool/result` 的 message 是 `{role:'user', source:{kind:'tool', callId}}`）。
-   * `Message.role` 的取值域只有 `'system' | 'user' | 'assistant'`——第一版按
-   * `role === 'tool'` 判定，在真实数据上永远配不上对，等于把安全性判据写成了恒真。
-   * 认工具结果只能认 `source.kind === 'tool'`。
+   * ⚠️ **认工具结果只认 `source.kind === 'tool'` + `source.callId`**，不看 `role`：
+   * v3 日志里工具结果消息的 `role` 是 `'user'`，v4 起才是 `'tool'`（`ToolResultMessage`），
+   * 而 seed 校验对 v4 的 `tool/result` 强制 `role === 'tool'`。插件要同时读迁移后的旧日志与
+   * 新日志，`source` 才是两代都成立的那条配对事实（第一版按 `role === 'tool'` 判定，在
+   * 当时的真实数据上永远配不上对，等于把安全性判据写成了恒真）。
    *
    * @param {any} session 目标 session。
    * @returns {boolean} 是否存在悬空调用。

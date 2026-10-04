@@ -111,6 +111,8 @@ export async function mountView({ nodes, current }) {
   const stub = makeReact()
   const disposers = []
   let registered
+  /** `uiWorkspace.openSession(target)` 的调用记录（断言跳转目标）。 */
+  const opened = []
 
   // 1) 拦住 `window.__ModuleLoader__.load`，拿到 bundle 的工厂
   let loaded
@@ -134,11 +136,25 @@ export async function mountView({ nodes, current }) {
   const context = {
     get(name) {
       if (name === 'sessions') {
+        // 0.2.0 的客户端面：列表快照没有 `current`——"当前显示的是哪条会话"由该行的
+        // `retainedBy.mainView` 表达（`ui-workspace` 用 `source:'mainView'` 保留它），
+        // 导航动作在 `uiWorkspace.openSession`。
         return {
-          list: { getSnapshot: () => ({ current }) },
+          list: {
+            getSnapshot: () => ({
+              ids: current === undefined ? [] : [current],
+              byId: current === undefined ? {} : { [current]: { id: current, retainedBy: { mainView: 1 } } },
+              phase: 'ready',
+              projectionsBySession: {},
+            }),
+          },
           refresh: async () => {},
-          open: async () => {},
+          refreshProjections: async () => {},
+          subagentAddress: () => undefined,
         }
+      }
+      if (name === 'uiWorkspace') {
+        return { openSession: (target) => { opened.push(target) } }
       }
       if (name === 'slots') {
         return {
@@ -167,6 +183,8 @@ export async function mountView({ nodes, current }) {
     tree,
     texts: stub.texts(tree),
     rows: stub.rows(tree),
+    /** 已经交给 `uiWorkspace.openSession` 的目标（跳转断言用）。 */
+    opened,
     stop() { disposers.forEach(fn => { if (typeof fn === 'function') fn() }) },
   }
 }
