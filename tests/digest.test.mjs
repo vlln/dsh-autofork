@@ -177,11 +177,11 @@ test('renderForkNotice 的说话人是**兄弟会话**（它以 agent-message �
   // 卡片，卡片头已经写明「来自会话 session-a」。所以正文里说话的人是**兄弟会话**：
   // 「你」= 新分叉会话（session-b），「我」= 兄弟（session-a）。
   // 写成新分叉会话自称（"我是分叉会话 session-b…"）会与卡片头自相矛盾。
-  assert.match(text, /你（分叉会话 session-b）已经从我会话 session-a 分叉出来了/)
-  assert.match(text, /\*\*接下来面对用户的是你\*\*/)
-  assert.match(text, /我留在后台继续跑我没做完的那一轮（不会被中止）/)
-  assert.match(text, /跑完我把结果发给你/)
+  assert.match(text, /你（分叉会话 session-b）接手了用户/)
+  assert.match(text, /我留在后台把没做完的那一轮跑完，结果会发给你/)
   assert.ok(!/我是分叉会话/u.test(text), '不得让新分叉会话自称——说话人是兄弟会话')
+  // 降噪后的契约：卡片头/来源前缀已经写明是谁发来的，正文不再重复报会话 id
+  assert.ok(!text.includes('session-a'), '正文不再重复兄弟的 id（前缀与卡片头已经给了）')
 })
 
 test('renderBranchHint 明说"用户已经切走了"（旧 agent 不该以为用户还在看它）', () => {
@@ -274,8 +274,8 @@ test('通知把兄弟的目标顶到最前面（埋在事件流水里等于没�
   })
   const head = notice.slice(0, 400)
   assert.match(head, /我此刻正在动.*src\/api\.ts.*src\/store\.ts/s)
-  assert.ok(head.indexOf('src/api.ts') < notice.indexOf('避让约定'),
-    '目标必须出现在避让约定之前')
+  assert.ok(head.indexOf('src/api.ts') < notice.indexOf('避让（'),
+    '目标必须出现在通用避让之前')
   // 必须写明"任务完整性优先于避让"——这是 8 次运行里 agent 一致采纳的优先级
   assert.match(notice, /任务完整性优先于避让/)
 })
@@ -283,7 +283,7 @@ test('通知把兄弟的目标顶到最前面（埋在事件流水里等于没�
 test('没有可识别目标时不产出空的目标段落', () => {
   const notice = renderForkNotice({ branchId: 'b', siblingId: 's', cwd: '/w' })
   assert.ok(!notice.includes('此刻正在动'), '无目标时不得留下空标题')
-  assert.match(notice, /避让约定/)
+  assert.match(notice, /避让（效率约定）/)
 })
 
 /* ---------------- 环境变量参数覆盖（验证/运维通道） ---------------- */
@@ -393,8 +393,13 @@ test('三兄弟消息的措辞：说话人是**兄弟会话**（「我」= 兄�
     assert.ok(!/我是分叉会话/u.test(text), `${name} 不得让新分叉会话自称`)
     assert.ok(!/我接管的那条/u.test(text), `${name} 不得用"接管"视角描述兄弟`)
   }
-  assert.match(notice, /\*\*接下来面对用户的是你\*\*/)
-  assert.match(digest, /以下是我（s）尚未结束的那一轮/)
-  assert.match(reply, /我（.*s.*）这一轮跑完了/)
-  assert.match(reply, /不在你的上下文里|最后一条回复如下/)
+  assert.match(notice, /你（分叉会话 b）接手了用户/)
+  assert.match(digest, /我（s）这一轮还没跑完（seed 切在 turn 边界），不在你的上下文里/)
+  assert.match(digest, /下面是原始事件流水，不是结论/)
+  assert.match(reply, /我这一轮跑完了，最后一条回复如下/)
+  // 降噪：三兄弟消息都不得在正文里重复报发送方的会话 id（卡片头 + 来源前缀已经给了）
+  for (const [name, text] of [['notice', notice], ['digest', digest], ['reply', reply]]) {
+    if (name === 'digest') continue  // digest 的「我（s）」是必要上下文（它要说明这是谁的那一轮）
+    assert.ok(!text.includes('会话 s'), `${name} 不再重复发送方 id`)
+  }
 })

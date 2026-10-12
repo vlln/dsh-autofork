@@ -342,31 +342,27 @@ export function activeTargets(events) {
  * @returns {string} 回复正文。
  */
 export function renderForkNotice({ branchId, siblingId, cwd, targets = [] }) {
-  const lines = ['[自动分叉通知]']
+  // 卡片本身已经给了标题（分叉通知）与「来自会话 X」，`agentMessage` 也加了来源前缀，
+  // 所以正文**不再重复**是谁发给谁的（用户反馈"注入内容噪声多"）。
+  // 正文只留三条事实：① 分工（用户归你）② 共享工作目录 ③ 避让要点。
+  const lines = [
+    '[分叉通知]',
+    `你（分叉会话 ${branchId}）接手了用户；我留在后台把没做完的那一轮跑完，结果会发给你。`,
+    `共享同一工作目录${cwd === undefined ? '' : `（${cwd}）`}，文件系统没有隔离。`,
+  ]
 
   if (targets.length > 0) {
     lines.push(
       '',
-      `**我此刻正在动：${targets.map(path => `\`${path}\``).join('、')}**`,
-      '如果这些也在你的任务范围内，你优先改**别的**目标——两边同时改同一处会让工作互相覆盖。',
-      '但如果它恰好是你任务里唯一或必须的目标，你**照常改**：任务完整性优先于避让。',
-      '那种情况下你先重读目标、用 edit，并预期可能撞到版本守卫。',
+      `我此刻正在动：${targets.map(path => `\`${path}\``).join('、')}`,
+      '这些也在你任务里就优先改**别的**目标；若它是唯一目标就照常改——任务完整性优先于避让。',
     )
   }
 
   lines.push(
     '',
-    `你（分叉会话 ${branchId}）已经从我会话 ${siblingId} 分叉出来了，**接下来面对用户的是你**——`,
-    '用户的下一条消息会到你那里，而不是我这里。',
-    `我留在后台继续跑我没做完的那一轮（不会被中止），跑完我把结果发给你。`,
-    `我们共享同一工作目录${cwd === undefined ? '' : `（${cwd}）`}，文件系统没有隔离。`,
-    '',
-    '避让约定（效率约定，不是安全保证）：',
-    '1. 写入前先重读目标文件；若它在你上次读取后变了，把改动重基到当前内容上，而不是写回你先前算出的值。',
-    '2. 优先用 edit 而不是整文件 write：edit 的冲突是局部且可恢复的，write 撞守卫后要重做整个合并。',
-    '3. 撞到 "file changed since it was read"（FS_STALE_VERSION）不是错误，是信号：重读、重基、重试。',
-    '4. 我正在改的东西上面列了；你不要同时改同一处。',
-    '5. 运行外部进程（bash）没有任何守卫保护——git commit、rm、mv、重定向都要你自己判断会不会和我冲突。',
+    '避让（效率约定）：改文件前重读并重基（撞 `FS_STALE_VERSION` 就重读重试）、优先 `edit`；'
+      + 'bash / git / rm 没有守卫，自己判断会不会和我撞。',
   )
   return lines.join('\n')
 }
@@ -389,14 +385,17 @@ export function renderInFlightDigest({ events, params, siblingId }) {
   const droppedByCount = events.length - bounded.length
   const { pinned, flow } = renderEventLines(bounded, params)
   const { text } = assembleWithinBudget({ pinned, flow }, params.digestMaxChars)
+  // 标题与「来自会话 X」已在卡片上；这里只需要说清两件事：这是**我还没跑完**的那一轮
+  // （所以它不在你的 seed 里），以及下面是**原始事件流水**、不是结论。
   const header = [
-    '[兄弟分叉在飞进度]',
-    `以下是我（${siblingId}）尚未结束的那一轮——它的 seed 只能切在 turn 边界上，所以这段工作不在你的上下文里。`,
-    '这是确定性渲染的原始事件流水，不是摘要，不要当成结论。',
+    '[在飞进度]',
+    `我（${siblingId}）这一轮还没跑完（seed 切在 turn 边界），不在你的上下文里。`
+      + '下面是原始事件流水，不是结论。',
   ].join('\n')
   // 事件窗口的丢弃发生在**渲染之前**，所以它的说明只能放在最前面（放在末尾同样会被误读成"末尾被砍"）。
+  // 参数名（`digestMaxEvents`）是给排障的人看的，模型只需要知道"更早的事件被截掉了"。
   const notes = droppedByCount > 0
-    ? [`（更早的 ${droppedByCount} 个事件因 digestMaxEvents 未渲染）`]
+    ? [`（更早的 ${droppedByCount} 个事件未渲染）`]
     : []
   return [header, ...notes, '', text].filter(part => part !== '').join('\n')
 }
@@ -519,7 +518,10 @@ export function instanceReplySummary({ instanceId, reply }) {
  */
 export function renderWorkerReply({ workerId, reply, stepCount, maxChars }) {
   const body = truncate(oneline(reply ?? ''), maxChars)
-  const header = `我（${driverLabel(workerId)}，会话 ${workerId}）这一轮跑完了，最后一条回复如下`
+  // 标题（后台会话回复）与「来自会话 <id>」都已在卡片上，`agentMessage` 还加了
+  // 「分叉会话 <id> 发来消息：」前缀——正文再报一次"我（分叉会话 ab12cd34）"就是第三次重复
+  // （用户反馈"注入内容噪声多"）。只说发生了什么。
+  const header = '我这一轮跑完了，最后一条回复如下'
   if (body === '') {
     return `${header}\n它这一轮没有产出文本回复（走了 ${String(stepCount)} 步）。`
   }

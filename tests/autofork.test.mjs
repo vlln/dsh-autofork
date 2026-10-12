@@ -482,8 +482,8 @@ test('running + 长 step + 有已完成 turn → 抢占消息、建分叉、注�
   }
   const cards = toHead.map(entry => entry.message)
   const text = cards.map(message => message.content[0].text)
-  assert.match(text[0], /自动分叉通知/)
-  assert.match(text[1], /兄弟分叉在飞进度/)
+  assert.match(text[0], /\[分叉通知\]/)
+  assert.match(text[1], /\[在飞进度\]/)
   for (const [index, message] of cards.entries()) {
     assert.deepEqual(message.source, {
       kind: 'agent-message',
@@ -670,7 +670,7 @@ test('没有已完成的 turn（第一个 turn 还在跑）→ **空 seed**，�
   const digest = calls.send
     .filter(entry => entry.agent === calls.agentsCreate[0].sessionId)
     .map(entry => entry.message.content[0].text)
-    .find(text => text.includes('兄弟分叉在飞进度'))
+    .find(text => text.includes('[在飞进度]'))
   assert.ok(digest !== undefined, '空 seed 时 digest 是唯一上下文来源，必须作为卡片投给 head')
   assert.match(digest, /npm test|把 config 的 revision 加一/)
   assert.ok(!calls.requeued.some(entry => entry.id === 'm-user'), '成功分叉后不应回放消息')
