@@ -107,21 +107,37 @@ test('tool/result 失败态被显式标注', () => {
   assert.match(flow[0], /\[结果 失败\]/)
 })
 
-test('assembleWithinBudget 永不丢固定行，并从最近往前保留流动行', () => {
+test('assembleWithinBudget 保最新：流动行从最近往前保留', () => {
   const { text, omitted } = assembleWithinBudget(
     { pinned: ['PIN-A', 'PIN-B'], flow: ['F1', 'F2', 'F3', 'F4', 'F5'] },
     20,
   )
-  assert.match(text, /PIN-A/)
-  assert.match(text, /PIN-B/)
-  assert.match(text, /F5/)
+  assert.match(text, /PIN-A/, 'turn 起始行是一个 turn 的身份，永远保留')
+  assert.match(text, /F5/, '最新的流动行必须在')
   assert.ok(omitted > 0, '应当报告被丢弃的行数')
   assert.ok(!text.includes('F1'), '最早的行应最先被丢弃')
 })
 
+test('assembleWithinBudget 固定行有上限：连续 steer 不得把进度挤光', () => {
+  // 用户 2026-10 反馈"摘要丢掉了最重要的最新情况"。实测根因不是"从头截断"（流动行一直是
+  // 从最近往前留），而是**固定行不受预算约束**：在飞 turn 里人类消息条数不设上限，
+  // 20 条各 600 字符就能吃光整个预算 ⇒ 进度只剩 1 行、正文还超出预算。
+  const pinned = ['--- turn 7 开始 ---', ...Array.from({ length: 20 }, (_, i) => `[用户] 第${i + 1}条指令${'填'.repeat(60)}`)]
+  const flow = Array.from({ length: 30 }, (_, i) => `[进度] 第${i + 1}行${'x'.repeat(40)}`)
+  const budget = 800
+  const { text, omitted, droppedPinned } = assembleWithinBudget({ pinned, flow }, budget)
+  assert.ok(droppedPinned > 0, '超出上限的固定行必须被丢弃（并上报）')
+  assert.ok(omitted > 0, '流动行必然也被限制')
+  assert.ok(text.includes('[进度] 第30行'), '最新的进度必须留下')
+  assert.ok(!text.includes('第1条指令'), '丢的是更早的指令')
+  assert.ok(text.length <= budget + 200, `正文必须有界（实际 ${text.length} / 预算 ${budget}）`)
+  assert.match(text, /此处省略/, '省略处必须就地标注，读者才知道断在哪')
+})
+
 test('assembleWithinBudget 丢弃量与实际不符时不谎报', () => {
-  const { omitted } = assembleWithinBudget({ pinned: [], flow: ['x'] }, 1000)
+  const { omitted, droppedPinned } = assembleWithinBudget({ pinned: [], flow: ['x'] }, 1000)
   assert.equal(omitted, 0)
+  assert.equal(droppedPinned, 0)
 })
 
 /* --------------------------- 确定性（核心） --------------------------- */
@@ -182,7 +198,7 @@ test('in-flight digest 的正文受字符预算约束', () => {
     data: { message: { source: { callId: `c${i}` }, content: [{ type: 'text', text: 'x'.repeat(5000) }] } },
   }))
   const text = renderInFlightDigest({ events: huge, params: DEFAULT_PARAMS, siblingId: 's' })
-  assert.match(text, /因字符预算未渲染|因 digestMaxEvents 未渲染/)
+  assert.match(text, /此处省略|因 digestMaxEvents 未渲染/)
   assert.ok(text.length < DEFAULT_PARAMS.digestMaxChars * 2, '必须有界')
 })
 

@@ -216,22 +216,42 @@ export function renderEventLines(events, params) {
 }
 
 /**
- * 在字符预算内组装行：固定行全保留，可丢弃行**从最近往前**保留。
+ * 在字符预算内组装行：**两端都从"最近"往回保**，省略处就地标注。
  *
- * 取最近而非取最早，因为分叉会话最需要知道的是"现在在做什么"；固定行
- * （turn 起始与用户指令）无论如何都保留，因为它们定义了整个 turn 的意图。
+ * 两条不变量（都是用户实测反馈推出来的）：
+ *
+ *  1. **最新状态必须留**。分叉会话最需要知道的是"兄弟**现在**在做什么"，而它这一轮的内容
+ *     只能由 digest 承载（seed 切在 turn 边界，在飞 turn 不在上下文里）。所以可丢弃行
+ *     **从最近往前**保留。
+ *  2. **固定行也不能无界**。在飞 turn 里人类消息的**条数不设上限**（连续 steer、长指令，
+ *     每条截到 `digestAssistantChars` 但条数不限）。早期版本固定行全留 ⇒ 20 条指令就能
+ *     吃光 8000 字符预算、把进度挤到只剩 1 行、正文还超出预算 50%——那才是真正的
+ *     "丢失最新情况"。所以固定行**最多占一半预算**，且只保 `pinned[0]`（turn 起始行，
+ *     一个 turn 的身份）与该上限内的**最近**几条用户指令。
+ *
+ * 省略**就地标注**（不再只在末尾写一句"（N 行未渲染）"）：那句话挂在末尾会被读成
+ * "末尾被砍掉了"，而实际被丢的是**更早**的行。
  *
  * @param {{pinned: string[], flow: string[]}} lines 渲染行。
  * @param {number} budget 字符上限。
- * @returns {{text: string, omitted: number}} 组装结果与丢弃行数。
+ * @returns {{text: string, omitted: number, droppedPinned: number}} 组装结果、被丢弃的
+ *   流动行数、被丢弃的固定行数（不含 turn 起始行）。
  */
 export function assembleWithinBudget(lines, budget) {
-  const kept = []
-  let used = 0
-  for (const line of lines.pinned) {
-    used += line.length + 1
-    kept.push(line)
+  const pinnedBudget = Math.floor(budget / 2)
+  // 第 0 条是 `--- turn N 开始 ---`：一个 turn 的身份，永远保留（它只有几十字符）。
+  const identity = lines.pinned.length > 0 ? lines.pinned[0] : undefined
+  const keptPinned = identity === undefined ? [] : [identity]
+  let used = identity === undefined ? 0 : identity.length + 1
+  const pinnedTail = []
+  for (let i = lines.pinned.length - 1; i >= 1; i -= 1) {
+    const line = lines.pinned[i]
+    const cost = line.length + 1
+    if (used + cost > pinnedBudget) break
+    used += cost
+    pinnedTail.push(line)
   }
+  let next = Math.max(0, lines.pinned.length - 1 - pinnedTail.length)  // 下一个候选固定行下标（往上走）
   const reversed = []
   for (let i = lines.flow.length - 1; i >= 0; i -= 1) {
     const line = lines.flow[i]
@@ -241,9 +261,24 @@ export function assembleWithinBudget(lines, budget) {
     reversed.push(line)
   }
   const omitted = lines.flow.length - reversed.length
-  const tail = [...reversed].reverse()
-  const text = [...kept, ...tail].join('\n')
-  return { text, omitted }
+  // 第二遍：进度没用满预算时，把还装得下的**更早的固定行**补回来。一半预算是保底的
+  // 下限（保证进度永远有位置），不是上限——剩下的字符给上下文比空着有用。
+  while (next >= 1 && used + lines.pinned[next].length + 1 <= budget) {
+    pinnedTail.push(lines.pinned[next])
+    used += lines.pinned[next].length + 1
+    next -= 1
+  }
+  const droppedPinned = next  // 下标 1..next 的固定行被丢弃
+  const head = [...keptPinned, ...[...pinnedTail].reverse()]
+  const body = [...head, ...reversed.reverse()]
+  if (droppedPinned > 0 || omitted > 0) {
+    const parts = []
+    if (droppedPinned > 0) parts.push(`${droppedPinned} 条更早的指令`)
+    if (omitted > 0) parts.push(`${omitted} 行更早的进度`)
+    // 插在"固定行"与"保留的尾部"之间 —— 那正是内容真正断开的位置。
+    body.splice(identity === undefined ? 0 : head.length, 0, `……（此处省略 ${parts.join(' 与 ')}）……`)
+  }
+  return { text: body.join('\n'), omitted, droppedPinned }
 }
 
 /**
@@ -353,16 +388,17 @@ export function renderInFlightDigest({ events, params, siblingId }) {
   const bounded = events.slice(-params.digestMaxEvents)
   const droppedByCount = events.length - bounded.length
   const { pinned, flow } = renderEventLines(bounded, params)
-  const { text, omitted } = assembleWithinBudget({ pinned, flow }, params.digestMaxChars)
+  const { text } = assembleWithinBudget({ pinned, flow }, params.digestMaxChars)
   const header = [
     '[兄弟分叉在飞进度]',
     `以下是我（${siblingId}）尚未结束的那一轮——它的 seed 只能切在 turn 边界上，所以这段工作不在你的上下文里。`,
     '这是确定性渲染的原始事件流水，不是摘要，不要当成结论。',
   ].join('\n')
-  const notes = []
-  if (droppedByCount > 0) notes.push(`（更早的 ${droppedByCount} 个事件因 digestMaxEvents 未渲染）`)
-  if (omitted > 0) notes.push(`（${omitted} 行因字符预算未渲染）`)
-  return [header, '', text, ...notes].filter(part => part !== '').join('\n')
+  // 事件窗口的丢弃发生在**渲染之前**，所以它的说明只能放在最前面（放在末尾同样会被误读成"末尾被砍"）。
+  const notes = droppedByCount > 0
+    ? [`（更早的 ${droppedByCount} 个事件因 digestMaxEvents 未渲染）`]
+    : []
+  return [header, ...notes, '', text].filter(part => part !== '').join('\n')
 }
 
 /**

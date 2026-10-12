@@ -111,7 +111,7 @@ agent 自己会用到的三个工具（`exposeDispatchTools: false` 可关掉）
 | `digestAssistantChars` | `600` | 单条助手文本截断长度 |
 | `digestToolArgsChars` | `300` | 单条工具调用参数截断长度 |
 | `digestToolResultChars` | `400` | 单条工具结果截断长度 |
-| `digestMaxEvents` | `200` | digest 最多渲染事件数（自尾部保留最近） |
+| `digestMaxEvents` | `200` | digest 最多渲染事件数（**自尾部**保留最近的；丢弃量在正文最前面标注） |
 | `reInjectOnTurnEnd` | `true` | 后台 turn 结束后是否把结果作为一张卡片投给前台（**不唤醒**它，所以不会多一次请求） |
 | `reInjectMaxChars` | `4000` | 回注内容字符上限 |
 | `containerMode` | `false` | **容器模式（实验，默认关）**：容器不跑 turn、消息交给绑定实例、答复写成一等回复。**不要打开**：容器**不可能**完全不跑 turn，这条模式会与实例重复劳动 |
@@ -155,7 +155,7 @@ DSH_AUTOFORK_DEBUG=/tmp/dsh-autofork-debug.log dsh web
 
 ## 验证
 
-`npm run verify` = 语法 + 3 道静态门禁 + 148 项自证测试（digest 的确定性/有界性、各条拒绝路径、结果回注、血缘持久化与命名规则、工具的授权边界、**「分叉」页签的渲染**——用 React 桩渲染真实 bundle，断言用户看到的文案）。`npm run preview:tab` 可以不开浏览器先看一眼页签长什么样。
+`npm run verify` = 语法 + 3 道静态门禁 + 149 项自证测试（digest 的确定性/有界性、各条拒绝路径、结果回注、血缘持久化与命名规则、工具的授权边界、**「分叉」页签的渲染**——用 React 桩渲染真实 bundle，断言用户看到的文案）。`npm run preview:tab` 可以不开浏览器先看一眼页签长什么样。
 
 真 harness 的行为层 E2E 台在 [`tests/e2e/`](tests/e2e/README.md)：它需要一个 **dsh 源码检出**（官方 mock LLM 不在 npm 闭包里），所以不进 `npm run verify`。改这个插件的内部机制与踩坑记录见[工程笔记](docs/engineering-notes.md)。
 
