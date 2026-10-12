@@ -73,10 +73,12 @@ test('页签渲染：触发指令、相对时间、状态、我在哪——都�
 
   const text = view.texts.join('\n')
   try {
-    // 摘要行：一共几条、几条在跑、几条已结束
-    assert.match(text, /分叉家族 · 3 条会话/)
-    assert.match(text, /1 条正在跑/)
-    assert.match(text, /1 条已结束/)
+    // 摘要行（降噪后）：一行说完"几条会话、几条还在跑"——不再罗列"几条已结束"，
+    // 也不再挂那句纯操作说明（用户反馈"文字太多"）
+    assert.match(text, /分叉家族/)
+    assert.match(text, /3 条会话 · 1 条在跑/)
+    assert.ok(!text.includes('点任意一行'), '操作说明属于噪声，已删')
+    assert.ok(!text.includes('缩进表示'), '操作说明属于噪声，已删')
 
     // **这次新增的三项"对用户有意义的信息"**
     assert.match(text, /触发：改成用 worktree 隔离/, '触发指令')
@@ -94,8 +96,12 @@ test('页签渲染：触发指令、相对时间、状态、我在哪——都�
     assert.ok(text.includes('根'), '家族根有自己的徽章')
     assert.match(text, /运行中/)
     assert.match(text, /空闲/)
-    assert.match(text, /已结束/)
     assert.match(text, /你在这里/)
+    // 已结束的行**不再**挂状态胶囊（整行已变淡，再挂一枚同样的胶囊是纯重复）；
+    // 完整会话 id 也从行里删掉了（它只留在 tooltip 上）
+    assert.ok(!text.includes('已结束'), '已结束不再重复成胶囊：\n' + text)
+    assert.ok(!text.includes('000001') && !text.includes('000002'),
+      '行内不再出现 6 位短 id（tooltip 里仍有完整 id）：\n' + text)
 
     // 一行一条会话（根 + 两条分叉），都可点
     assert.equal(view.rows.length, 3)
@@ -159,7 +165,7 @@ test('页签渲染：旧边（没有 trigger / at）只显示会话坐标，不�
     assert.match(text, /会话 000002/, '没有名字时退回会话短 id')
     // 旧数据（没有 label）时用完整 title，而不是渲染成空
     assert.ok(!/^\s*$/m.test(text), '不能渲染出空行')
-    assert.match(text, /已结束/)
+    assert.ok(!text.includes('已结束'), '已结束不再重复成胶囊')
     assert.ok(!/undefined|null|NaN/.test(text), '渲染文案里不能漏出 undefined：\n' + text)
   } finally {
     view.stop()
@@ -170,9 +176,10 @@ test('页签渲染：只有自己一条会话时给"还没有分叉"的引导，
   const view = await mountView({ current: 'session-root-000001', nodes: [node({})] })
   const text = view.texts.join('\n')
   try {
-    assert.match(text, /这条会话还没有分叉/)
-    assert.match(text, /就会自动分叉出一条新会话/, '空态要说明怎么触发分叉')
-    assert.match(text, /⑂1 <本会话名>/, '空态给出分叉后的名字形状')
+    assert.match(text, /还没有分叉/, '摘要行要说明还没有分叉')
+    assert.match(text, /就会自动分叉出新会话/, '空态要说明怎么触发分叉')
+    assert.ok(!text.includes('⑂1 <本会话名>'),
+      '空态压缩成一句，不再复述命名规则（那里已经有一行示例行）')
     assert.ok(!/undefined|null|NaN/.test(text), '渲染文案里不能漏出 undefined：\n' + text)
   } finally {
     view.stop()

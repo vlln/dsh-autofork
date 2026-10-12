@@ -354,11 +354,11 @@ window.__ModuleLoader__.load({
           style: { flex: 'none', color: TOKEN.labelTertiary },
         }, rel))
       }
-      info.push(React.createElement('span', {
-        key: 'id',
-        style: { flex: 'none', color: TOKEN.caption },
-      }, shortId(node.sessionId)))
 
+      // 状态胶囊只在**活着的**行上出现：已结束的行整行已经变淡，再挂一枚"已结束"胶囊是
+      // 纯重复（用户反馈"文字太多、噪声大"）。于是整棵树里只有"还在占资源"的那几行有颜色，
+      // 一眼就能看出谁还在跑。
+      var showState = node.state !== 'finished'
       var topRow = [
         React.createElement('span', {
           key: 'label',
@@ -373,7 +373,7 @@ window.__ModuleLoader__.load({
         isCurrent ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
         isDriver && !isCurrent ? chip('driver', '现在回答你的是它', TOKEN.labelSecondary, 'rgba(127, 127, 127, 0.14)') : null,
         React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
-        chip('state', meta.text, meta.color, meta.tint),
+        showState ? chip('state', meta.text, meta.color, meta.tint) : null,
       ]
 
       return React.createElement('div', {
@@ -397,7 +397,7 @@ window.__ModuleLoader__.load({
           // 缩进表达树上位置（0 = 家族根）。树是"同一条会话被分叉多次"的多叉，
           // 所以深度缩进 + 行首的 └ 记号，比在行内画连线更省地方也更好读。
           marginLeft: String(node.depth * 14) + 'px',
-          padding: '9px 12px',
+          padding: '8px 10px',
           border: '1px solid ' + (isCurrent ? TOKEN.accent : 'transparent'),
           borderRadius: '8px',
           background: isCurrent
@@ -1195,28 +1195,33 @@ window.__ModuleLoader__.load({
         children.push(React.createElement('div', { key: 'loading', style: HINT_STYLE }, '正在读取分叉关系…'))
       } else {
         var running = nodes.filter(function (node) { return node.state === 'running' }).length
-        var done = nodes.filter(function (node) { return node.state === 'finished' }).length
-        var summary = ['分叉家族 · ' + String(nodes.length) + ' 条会话']
-        if (running > 0) summary.push(String(running) + ' 条正在跑')
-        if (done > 0) summary.push(String(done) + ' 条已结束')
+        // 一行说完：几条会话、几条还在跑。原来那句"点任意一行切到那条会话；缩进表示它是从哪条
+        // 分出去的"是纯操作说明（用户反馈"文字太多"）——行本身就是按钮、缩进也看得出来，
+        // 所以删掉；只有在"还没有分叉"时才留一句引导（那时用户确实需要知道怎么产生分叉）。
+        var summary = [String(nodes.length) + ' 条会话']
+        if (running > 0) summary.push(String(running) + ' 条在跑')
+        if (nodes.length === 1) summary.push('还没有分叉')
         children.push(React.createElement('div', {
           key: 'summary',
-          style: { marginBottom: '4px' },
+          style: {
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: '8px',
+            marginBottom: '6px',
+          },
         }, [
           React.createElement('div', {
             key: 'a',
             style: { fontWeight: '600', fontSize: '13px', color: TOKEN.labelPrimary },
-          }, summary.join(' · ')),
+          }, '分叉家族'),
           React.createElement('div', {
             key: 'b',
-            style: { marginTop: '2px', color: TOKEN.labelTertiary, fontSize: '12px' },
-          }, nodes.length === 1
-            ? '这条会话还没有分叉。'
-            : '点任意一行切到那条会话；缩进表示它是从哪条分出去的。'),
+            style: { color: TOKEN.labelTertiary, fontSize: '12px' },
+          }, summary.join(' · ')),
         ]))
         children.push(React.createElement('div', {
           key: 'rows',
-          style: { display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '10px' },
+          style: { display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '8px' },
         }, nodes.map(function (node) {
           return React.createElement(BranchRow, {
             key: node.sessionId, node: node, driver: driver, now: now,
@@ -1225,15 +1230,9 @@ window.__ModuleLoader__.load({
         if (nodes.length === 1) {
           children.push(React.createElement('div', {
             key: 'empty',
-            style: Object.assign({ marginTop: '10px' }, HINT_STYLE),
-          }, [
-            React.createElement('div', { key: 'a' },
-              '当它正在跑（模型还在生成、或工具还在执行）的时候你再发一条指令，'
-              + '就会自动分叉出一条新会话：你立刻在新的那条里继续说话，原来这条留在后台把活干完，'
-              + '结果回注到这里。'),
-            React.createElement('div', { key: 'b', style: { marginTop: '6px' } },
-              '分叉出来的会话会带着触发它的那条指令出现在上面，名字是 `⑂1 <本会话名>`。'),
-          ]))
+            style: Object.assign({ marginTop: '10px', maxWidth: '52ch' }, HINT_STYLE),
+          }, '当它正忙（模型在生成 / 工具在执行）时你再发一条指令，就会自动分叉出新会话：'
+            + '你立刻在新的那条里继续说话，这条留在后台把活干完、结果回注过来。'))
         }
       }
 
@@ -1252,6 +1251,12 @@ window.__ModuleLoader__.load({
           flexDirection: 'column',
           minHeight: '0',
           overflowY: 'auto',
+          // 与「对话」页签的转写同宽并居中：铺满整个内容区（约 1000px）会让一行里的信息
+          // 拉得很散、看着吵。`--dsh-chat-content-width` 由会话外壳定义在本视图的祖先上。
+          width: '100%',
+          maxWidth: 'var(--dsh-chat-content-width, 760px)',
+          margin: '0 auto',
+          boxSizing: 'border-box',
           padding: '18px 24px 28px',
           fontSize: 'var(--dsw-font-xs-13, 13px)',
           lineHeight: '20px',
