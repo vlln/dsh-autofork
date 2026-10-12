@@ -363,3 +363,25 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
   header.props.onClick()  // 桩的 useState 是只读的，展开态由真 GUI 验证（见工程笔记）
   bundle.stop()
 })
+
+test('页签：挂稳定视图标记，并藏掉官方共享的左右拖动宽度手柄', async () => {
+  // 用户实测：插件页签上出现了「对话」页签用来调转写宽度的两条 col-resize 竖线。
+  // 根因是 `conversation.view` 各页签**共用**会话内容区，而宽度手柄由外壳渲染
+  // （`ConversationWidthControls`，与"当前是哪个页签"无关）⇒ 它跟着出现了。
+  const bundle = await mountBundle({ current: 'session-parent', mode: 'auto', queueRowNodes: [] })
+
+  // ① 视图根元素带稳定标记（官方 CSS module 类名是哈希，只能锚 data 属性）
+  const entry = bundle.registry.get('conversation.view')
+  assert.ok(entry !== undefined, '「分叉」页签必须注册进 conversation.view')
+  const tree = bundle.stub.render({ type: entry.component, props: {}, children: [] })
+  assert.equal(tree.props['data-dsh-autofork-view'], '',
+    '视图根元素必须带 data-dsh-autofork-view（样式表按它选）')
+
+  // ② 样式表里那条隐藏规则（用官方的 `:has()` 思路 + 稳定的 [data-width-handle]）
+  const css = bundle.styleElements.map(element => element.textContent).join('')
+  assert.match(css, /:has\(\[data-dsh-autofork-view\]\) \[data-width-handle\]\{display:none\}/,
+    '必须藏掉官方共享的宽度手柄')
+  assert.ok(!css.includes(':has(> [data-dsh-autofork-view])'),
+    '不能用 `>`：本视图挂在 [data-conversation-scroll] 里面，是共享内容区的孙节点（实测匹配不上）')
+  bundle.stop()
+})

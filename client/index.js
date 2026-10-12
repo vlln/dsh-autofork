@@ -111,6 +111,12 @@ window.__ModuleLoader__.load({
     /** 卡片根节点的 DOM 属性（样式按它选）。 */
     var CARD_ATTR = 'data-dsh-autofork-card'
 
+    /**
+     * 「分叉」页签根元素的 DOM 属性（样式表按它选，含"藏掉官方的宽度手柄"那条规则）。
+     * 与 {@link CARD_ATTR} 同理：插件拿不到官方 CSS module 的哈希类名，只能锚稳定的 data 属性。
+     */
+    var VIEW_ATTR = 'data-dsh-autofork-view'
+
     /** 标记 → 卡片标题（`source.autofork`，宿主 half 与这里必须一字不差）。 */
     var CARD_TITLES = {
       notice: '分叉通知',
@@ -1132,6 +1138,14 @@ window.__ModuleLoader__.load({
           'var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}',
           '[data-dsh-autofork-fork]:disabled{cursor:default;opacity:.45}',
           '[data-dsh-autofork-fork][data-tone=error]{color:var(--dsw-alias-state-error-primary,#c62828)}',
+          // 藏掉官方的左右拖动宽度手柄：它挂在**各页签共享**的会话内容区上，本来只服务
+          // 「对话」页签（调转写内容宽度）。官方自己也有同款写法（`ConversationRoot` 的
+          // `.widthHandle{display:none}` 那条用 `:has()`），我们照抄这个思路，锚点用稳定
+          // 的 `[data-width-handle]`（官方 CSS module 类名是哈希，插件拿不到）。
+          // 切页签时另一个视图会被卸载（实测），所以本选择器不会在「对话」页签上误伤。
+          // 不能写 `:has(> [data-dsh-autofork-view])`：本视图挂在 `[data-conversation-scroll]`
+          // 里面，是那个内容区的**孙节点**，`>` 匹配不上（实测 display 仍是 block）。
+          ':has([data-dsh-autofork-view]) [data-width-handle]{display:none}',
         ].join('')
         document.head.appendChild(element)
       }
@@ -1224,6 +1238,14 @@ window.__ModuleLoader__.load({
       }
 
       return React.createElement('div', {
+        // **本页签的稳定标记**。`conversation.view` 的各页签共用同一个"会话内容区"，
+        // 而官方的**左右拖动宽度手柄**（`[data-width-handle]`）挂在那块共享区域上、
+        // 不属于任何一个视图——于是它会跟着出现在本页签上（那根竖线是「对话」页签用来
+        // 调内容宽度的，在这里没有任何意义）。官方的处理方式也是 `:has()` 选择器
+        // （见 ConversationRoot 的 `.widthHandle{display:none}` 那条），所以这里也用它：
+        // 只要本视图还挂载着，就把手柄藏掉。**前提已经实测**：切页签时另一个视图会被
+        // 卸载（在「分叉」页签上 `[data-chat-node-key]` 数量为 0），所以这个选择器不会误伤。
+        [VIEW_ATTR]: '',
         style: {
           display: 'flex',
           flex: '1 1 auto',

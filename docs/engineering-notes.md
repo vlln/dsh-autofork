@@ -293,6 +293,38 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 
 **一般教训**：一条"丢弃类"提示写在末尾，读者必定理解成"末尾被丢弃"——提示必须出现在**它描述的那个断点**上，否则它会制造一个比它解释的问题更大的误解。
 
+### 插件页签会继承「对话」页签的宽度手柄（真 GUI 实测，已修）
+
+**现象**：插件注册的 `conversation.view` 页签上出现两条竖线、鼠标移上去变 `col-resize` 还能拖
+——那是「对话」页签用来调**转写内容宽度**的手柄。
+
+**机制**（在真 GUI 的 DOM 上核对，不是猜的）：各页签**共用**同一块会话内容区，而手柄由外壳渲染、
+不属于任何视图：
+
+```
+[data-conversation-region=content]
+├── [data-conversation-scroll]        ← 当前视图（我们的页签在这里面）
+├── div[data-width-handle=left]       ← 外壳的宽度手柄（兄弟节点）
+└── div[data-width-handle=right]
+```
+
+来源是 `dsh-client-ui-conversation` 的 `ConversationWidthControls`（factory 槽 `widthControls` 的
+默认实现）：只有 `container === null || phase !== 'active'` 才 `return null`，**与"当前是哪个页签"无关**。
+
+**修法**（两步）：视图根元素挂稳定标记 `data-dsh-autofork-view`；样式表加一条
+`:has([data-dsh-autofork-view]) [data-width-handle]{display:none}`。
+
+**两个前提/坑都实测过**：
+
+- **切页签时另一个视图会被卸载**（在「分叉」页签上 `[data-chat-node-key]` 数量为 0）⇒ `:has()`
+  只在我们的页签挂载时成立，切回「对话」实测 `display:block`，**不误伤**；
+- **写 `>` 匹配不上**：本视图是那块共享区域的**孙节点**，`has(> …)` 实测 `display` 仍是 `block`；
+  官方 CSS module 类名（`wSkVaW_widthHandle`）是哈希、插件拿不到，但 `[data-width-handle]` 稳定
+  ——而且官方**自己也**用 `:has()` 隐藏它（`ConversationRoot` 的 `.widthHandle{display:none}`）。
+
+**已同步到 `make-dsh-plugin` skill**（`references/gotchas.md` §10 + SKILL.md 的指针），因为几乎每个
+新增会话页签的插件都会撞上它。**别顺手把输入框座也藏了**：它同样是共享的，但在任何页签都有意义。
+
 ### 消息形状（会话格式 v4 的硬要求）
 
 插件往日志里写的每一条消息都必须过 v4 的采用校验，下面几条是踩过／核过的：
