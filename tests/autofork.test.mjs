@@ -11,8 +11,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { apply, inject as declaredInject, name as pluginName } from '../index.mjs'
-import { DEFAULT_PARAMS as DEFAULT_PARAMS_REF } from '../src/params.mjs'
+import { apply, inject as declaredInject, name as pluginName, Config } from '../index.mjs'
+import { DEFAULT_PARAMS as DEFAULT_PARAMS_REF, resolveParams, forkModeOf } from '../src/params.mjs'
 
 // 实现用真实 Date.now() 计算 step 年龄，夹具必须以真实当前时间为基准，
 // 否则"step 太年轻"这类断言会因基准错位而假通过或假失败。
@@ -121,6 +121,10 @@ function harness(options = {}) {
     registeredTools: [], cancels: [], effects: [], requeued: [], nestedInject: [], appended: [],
     /** 注册过的 webServer 路由（health 探针），供测试直接调用 handler。 */
     routes: [],
+    /** **子会话**（head / 实例）日志里被追加的事件：`[{ sessionId, type, data, opts }]`。 */
+    childAppended: [],
+    /** `agent.send(message, target, wakeup)` 的投递记录（next-turn 但不唤醒那条路）。 */
+    send: [],
     /** `sessionTitle.rename()` 的调用记录：分叉命名的观测面。 */
     renames: [],
     /** 血缘域的写入记录：`[{ headId, edge }]`。 */
@@ -132,9 +136,17 @@ function harness(options = {}) {
   /** 父 agent（被分叉的那个）。 */
   const parentInbox = {
     pending: new Set(['m-user']),
+    /**
+     * 待处理的用户消息（真实 `Inbox` 的读取面）。手动分叉的动作路由**只认此刻还在这两个
+     * 表里的消息**，所以夹具必须给出它们，否则测到的是"路由查不到消息"那条拒绝路径。
+     */
+    nextTurn: [],
+    nextStep: [],
     remove(id) {
       calls.removes.push(id)
       parentInbox.pending.delete(id)
+      parentInbox.nextTurn = parentInbox.nextTurn.filter(message => message?.id !== id)
+      parentInbox.nextStep = parentInbox.nextStep.filter(message => message?.id !== id)
       // 默认"抢到"：夹具不追踪具体是哪些 id 进了 inbox（真实实现里 loop 只在步边界
       // 才领取，所以要测"抢不到"的场景请显式传 casWins: false）。
       return options.casWins === false ? false : true
@@ -194,9 +206,26 @@ function harness(options = {}) {
       get: (id) => createdAgents.get(id),
       create: async (opts) => {
         calls.agentsCreate.push(opts)
+        // 子会话的**可写日志**。卡片化之后插件会把分叉通知 / 在飞摘要 / 后台回注写成 head
+        // 日志里的**一等助手回复**（用户看到助手卡片），所以夹具必须支持
+        // append / snapshotEvents / deriveMessages 三件——否则测到的永远是
+        // "写不进去 → 退回注入"那条兜底，而不是真实路径（"测试还绿着但测的是别的"
+        // 这类坑在 AGENTS.local.md 里记过好几次）。
+        const childEvents = []
+        const childSession = {
+          id: opts.sessionId,
+          header: { id: opts.sessionId, createdAt: 1_700_000_000_000, cwd: opts.meta?.cwd },
+          append: (type, data, appendOptions) => {
+            if (options.childAppendThrows === type) throw new Error('stub: append refused')
+            childEvents.push({ seq: childEvents.length, type, data, ...(appendOptions ?? {}) })
+            calls.childAppended.push({ sessionId: opts.sessionId, type, data, opts: appendOptions })
+          },
+          snapshotEvents: () => childEvents,
+          deriveMessages: () => childEvents.map(deriveEventMessage).filter(Boolean),
+        }
         const child = {
           id: opts.sessionId,
-          session: { id: opts.sessionId, header: { id: opts.sessionId, createdAt: 1_700_000_000_000, cwd: opts.meta?.cwd } },
+          session: childSession,
           status: 'running',
           ctx: {
             on(event, handler) {
@@ -206,6 +235,9 @@ function harness(options = {}) {
           },
           inject: (message) => calls.injections.push({ agent: opts.sessionId, message }),
           followup: (message) => calls.followups.push({ agent: opts.sessionId, message }),
+          // `send(msg, target, wakeup)`：进 next-turn 但不唤醒那条路（客户端只对 next-turn 的
+          // 认领判 `waking`，所以 relay 消息必须走它）——夹具照抄真实签名。
+          send: (message, target, wakeup) => calls.send.push({ agent: opts.sessionId, message, target, wakeup }),
           steer: (message) => calls.steers.push({ branch: opts.sessionId, message }),
           cancel: (cause, o) => calls.cancels.push({ branch: opts.sessionId, cause, opts: o }),
         }
@@ -214,7 +246,20 @@ function harness(options = {}) {
         return { agent: child, dispose: async () => {} }
       },
     },
-    sessionProjections: { stateOf: () => projection },
+    // 投影**按会话**给：父子共用一份投影会让"新建的 head 也带着开着的 turn"，
+    // 那样卡片永远走不进真实路径。head 默认是干净的（真实 harness 里刚 create 出来就是这样），
+    // 需要"head 正忙"的场景用 options.childProjection 显式给。
+    sessionProjections: {
+      stateOf: (session, key) => {
+        if (key !== 'turnBoundary') return undefined
+        if (session?.id !== undefined && session.id !== 'session-parent') {
+          const raw = options.childProjection
+          const value = typeof raw === 'function' ? raw(session.id) : raw
+          return value ?? { openTurnStartSeq: null, lastTurn: 0 }
+        }
+        return projection
+      },
+    },
     agentPresets: { composeFrom: (agentCtx, parentCtx) => { calls.composeFrom = [agentCtx, parentCtx]; return 'standard' } },
     agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
     tools: { register: (tool) => { calls.registeredTools.push(tool); return () => {} } },
@@ -288,6 +333,64 @@ const userMessage = (id = 'm-user') => ({
   id, role: 'user', content: [{ type: 'text', text: '改成用 worktree 隔离' }], source: { kind: 'user' },
 })
 
+/**
+ * 取某个会话日志里被追加的**一等助手回复**文本（按写入顺序）。
+ *
+ * 卡片化的判据就是这个：内容以 `assistant/message` 落进 head 的日志（客户端渲染成助手
+ * 卡片），而不是作为 `user/message` 注入（那只会渲染成一行折叠的"上下文注入"）。
+ * @param {any} calls harness 的调用记录。
+ * @param {string} sessionId 目标会话 id。
+ * @returns {string[]} 回复文本。
+ */
+function appendedAnswerTexts(calls, sessionId) {
+  return calls.childAppended
+    .filter(entry => entry.sessionId === sessionId && entry.type === 'assistant/message')
+    .map(entry => (entry.data?.message?.content ?? [])
+      .filter(part => part?.type === 'text')
+      .map(part => part.text)
+      .join(''))
+}
+
+/**
+ * 取 **head 收到的 agent 消息**（官方 `agent-message` 形状），`inject` 与 `followup` 都算。
+ *
+ * 两条路的区别只是"要不要现在就叫醒它"——观感上都是同一张 turn-trigger 卡片，
+ * 所以断言消息形状时不该区分它们。
+ * @param {any} calls harness 的调用记录。
+ * @param {string} headId 目标会话 id。
+ * @param {string} [needle] 只取正文含该串的消息（分叉时那两条通知也是 agent 消息，要区分开）。
+ * @returns {any[]} 收到的消息。
+ */
+function relayedTo(calls, headId, needle) {
+  return [...calls.injections, ...calls.followups, ...calls.send]
+    .filter(entry => entry.agent === headId && entry.message?.source?.kind === 'agent-message')
+    .map(entry => entry.message)
+    .filter(message => needle === undefined || message.content[0].text.includes(needle))
+}
+
+/**
+ * 取追加进某个会话日志的**卡片**（本插件的 `agent-message` + `autofork` 标记）。
+ * @param {any} calls harness 的调用记录。
+ * @param {string} sessionId 目标会话 id。
+ * @returns {any[]} 卡片消息。
+ */
+function appendedCards(calls, sessionId) {
+  return calls.childAppended
+    .filter(entry => entry.sessionId === sessionId && entry.type === 'user/message')
+    .map(entry => entry.data)
+    .filter(message => typeof message?.source?.autofork === 'string')
+}
+
+/**
+ * 取某个会话日志里被追加的事件类型序列。
+ * @param {any} calls harness 的调用记录。
+ * @param {string} sessionId 目标会话 id。
+ * @returns {string[]} 事件类型。
+ */
+function appendedTypes(calls, sessionId) {
+  return calls.childAppended.filter(entry => entry.sessionId === sessionId).map(entry => entry.type)
+}
+
 /* ------------------------------ 契约 ------------------------------ */
 
 test('导出 name / inject / apply，且 inject 是数组', () => {
@@ -360,13 +463,39 @@ test('running + 长 step + 有已完成 turn → 抢占消息、建分叉、注�
   // 子分叉加入父分叉的 standing composition（第二个参数必须是父的 ctx）
   assert.deepEqual(calls.composeFrom?.[1], { tag: 'parent-ctx' })
 
-  // 发给 **head** 的注入：分叉通知 + 在飞 turn 进度，各一次
+  // 发给 **head** 的上下文：分叉通知 + 在飞 turn 进度，两条都是**直接落盘的卡片**。
+  //
+  // ★ 回归钉（用户实测报的两个 bug 都在这一行上）：
+  //  · 走 next-turn ⇒ `ReactLoopInbox.claim` 每轮只认领 1 条 ⇒ 三条消息 = 三个 turn = 三次模型请求；
+  //  · 走 next-step ⇒ 一个 turn、一次请求，但客户端只有在 `idleSteer` 成立时才渲染成卡片
+  //    （要求"本轮不是被队列消息开场、批里没有人类消息"），而用户那条指令必然同批 ⇒ 卡片不可见。
+  // 所以卡片**直接落盘**（不进 inbox、不开 turn、不额外请求），渲染交给本插件的客户端节点视图。
   const headId = opts.sessionId
-  const toHead = calls.injections.filter(entry => entry.agent === headId)
-  assert.equal(toHead.length, 2, 'head 应收到通知 + digest')
-  const text = toHead.map(entry => entry.message.content[0].text)
+  const toHead = calls.send.filter(entry => entry.agent === headId)
+  assert.equal(toHead.length, 2, '两张卡必须走收件箱')
+  for (const entry of toHead) {
+    // ★ 必须 next-step：next-turn 每轮只认领 1 条（会变成三次请求）；直接 append 又插在
+    //   head 自己的 system/message 之前 ⇒ 会话格式判定 protected first row 被违反 ⇒ 日志 corrupt
+    //   （写入端不报错，重开这条会话时才炸）。next-step 与用户那条指令同批认领，落在 system 之后。
+    assert.equal(entry.target, 'next-step', '两张卡必须进 next-step')
+    assert.equal(entry.wakeup, false, '不在这里唤醒：让用户那条指令去唤醒')
+  }
+  const cards = toHead.map(entry => entry.message)
+  const text = cards.map(message => message.content[0].text)
   assert.match(text[0], /自动分叉通知/)
   assert.match(text[1], /兄弟分叉在飞进度/)
+  for (const [index, message] of cards.entries()) {
+    assert.deepEqual(message.source, {
+      kind: 'agent-message',
+      form: 'relay',
+      senderSessionId: 'session-parent',
+      autofork: index === 0 ? 'notice' : 'digest',
+    }, 'source 必须是 agent-message + relay + sender + 本插件的种类标记')
+  }
+  assert.equal(appendedCards(calls, headId).length, 0,
+    '绝不能直接落盘：head 还没有自己的 system/message（protected first row）')
+  // 一条助手消息都不该被追加（合成 turn 那条路已废弃）
+  assert.equal(appendedAnswerTexts(calls, headId).length, 0, '不得再往 head 日志里写合成助手回复')
 
   // 在飞 turn 的补偿内容：包含正在跑的那条 bash 调用
   assert.match(text[1], /npm test/, 'digest 必须带上在飞 turn 的实际动作')
@@ -382,12 +511,20 @@ test('running + 长 step + 有已完成 turn → 抢占消息、建分叉、注�
   assert.equal(calls.followups[0].message.id, 'm-user')
   assert.equal(calls.followups[0].agent, headId, '用户指令必须投给 head')
 
-  // 注入消息带**生产者自有**的 plugin source（会话格式 v4 要求 kind 非空且不是被退役的
-  // `plugin`；`plugin:<name>` 是第三方生产者的命名空间，见 PLUGIN_SOURCE 的注释），
-  // 不与人类发言混淆；并声明 notice 形态（客户端折叠成一行摘要）。`summary` 必须存在且
-  // 非空——客户端 `noticeSummary()` 对空串返回 null，会静默退回整块呈现，等于这次折叠白设。
+  // 两类注入各有各的形状契约：
+  //  · 兄弟会话发来的消息（分叉通知 / 在飞摘要 / 后台回传）→ 官方 `agent-message` + `relay`
+  //    + `senderSessionId`（客户端据此渲染 turn-trigger 卡片；缺 sender 会退化成灰色上下文行）；
+  //  · 其余插件注入（worker 的转向提示、容器镜像）→ 生产者自有的 `plugin:<name>` kind + notice
+  //    形态。v4 要求 kind 非空且不是被退役的 `plugin`；`summary` 必须非空且 ≤120
+  //    （客户端 `noticeSummary()` 对空串返回 null，会静默退回整块呈现）。
   for (const entry of calls.injections) {
     const source = entry.message.source
+    if (source.kind === 'agent-message') {
+      assert.equal(source.form, 'relay')
+      assert.equal(typeof source.senderSessionId, 'string')
+      assert.ok(source.senderSessionId.length > 0)
+      continue
+    }
     assert.equal(source.kind, 'plugin:dsh-autofork')
     assert.equal(source.form, 'notice')
     assert.equal(typeof source.summary, 'string')
@@ -530,9 +667,12 @@ test('没有已完成的 turn（第一个 turn 还在跑）→ **空 seed**，�
   assert.equal('isSeeded' in opts.meta, false)
 
   // 在飞 turn 的全部内容由 digest 承载（含用户那条指令）——这才是它的唯一来源。
-  const digest = calls.injections.find(entry => entry.message.content[0].text.includes('兄弟分叉在飞进度'))
-  assert.ok(digest !== undefined, '空 seed 时 digest 是唯一上下文来源，必须注入')
-  assert.match(digest.message.content[0].text, /npm test|把 config 的 revision 加一/)
+  const digest = calls.send
+    .filter(entry => entry.agent === calls.agentsCreate[0].sessionId)
+    .map(entry => entry.message.content[0].text)
+    .find(text => text.includes('兄弟分叉在飞进度'))
+  assert.ok(digest !== undefined, '空 seed 时 digest 是唯一上下文来源，必须作为卡片投给 head')
+  assert.match(digest, /npm test|把 config 的 revision 加一/)
   assert.ok(!calls.requeued.some(entry => entry.id === 'm-user'), '成功分叉后不应回放消息')
 })
 
@@ -617,23 +757,35 @@ test('被接管的会话（worker）转 idle → 它的最后一条回复转给 
     { seq: 7, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
   ]
 
-  const injectionsBefore = calls.injections.length
+  // head 已经开过口（日志里有它自己的 system/message）⇒ 可以安全地直接落盘
+  const head = ctx.agents.get(headId)
+  head.session.snapshotEvents = () => [
+    { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
+    { seq: 1, type: 'system/message', data: { turn: 1, step: 1 }, time: NOW },
+  ]
   const followupsBefore = calls.followups.length
   listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
   await flush()
 
-  const added = [
-    ...calls.injections.slice(injectionsBefore),
-    ...calls.followups.slice(followupsBefore),
-  ]
-  assert.equal(added.length, 1, 'idle 后应恰好产生一条注入')
-  const text = added[0].message.content[0].text
+  // 回传是**直接落盘的一张卡片**：head 不会因此多跑一轮（= 不会多一次模型请求），卡片立刻出现。
+  const cards = appendedCards(calls, headId).filter(message => message.source.autofork === 'reply')
+  assert.equal(cards.length, 1, '回传必须作为卡片落进 head 的日志')
+  assert.deepEqual(cards[0].source, {
+    kind: 'agent-message',
+    form: 'relay',
+    senderSessionId: 'session-parent',
+    autofork: 'reply',
+  }, '回传必须是 agent-message + relay + sender + reply 标记')
+  const text = cards[0].content[0].text
   // **只转最后一条回复**，不转整个 turn 的事件流水
   assert.match(text, /结论：改了两个文件/)
   assert.ok(!text.includes('中间过程'), '不应把 turn 的中间过程一起转过去')
-  assert.match(text, /后台会话回复/)
-  // 方向正确：落到 head 上，而不是 worker 自己
-  assert.equal(added[0].agent, headId, '注入必须发给 head，而不是被接管的会话')
+  assert.equal(calls.followups.length, followupsBefore, '落盘卡片不得唤醒 head（那会让它再跑一轮）')
+  assert.equal(
+    calls.send.filter(entry => entry.agent === headId && entry.message.source.autofork === 'reply').length,
+    0,
+    'head 已开口 ⇒ 回传直接落盘，不再排收件箱',
+  )
 })
 
 test('无关 agent 转 idle 不得被回注（全局订阅必须按 workerId 过滤）', async () => {
@@ -660,35 +812,58 @@ test('同一条 worker 的重复 idle 不会重复注入', async () => {
     { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
   ]
   const handler = listeners.get('agent/status')[0]
+  const headId = calls.agentsCreate[0].sessionId
+  const head = ctx.agents.get(headId)
+  head.session.snapshotEvents = () => [
+    { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
+    { seq: 1, type: 'system/message', data: { turn: 1, step: 1 }, time: NOW },
+  ]
+  const cardCount = () => appendedCards(calls, headId).filter(m => m.source.autofork === 'reply').length
   handler({ agent: parent, status: 'idle' })
   await flush()
-  const first = calls.injections.length + calls.followups.length
+  const first = cardCount()
+  assert.equal(first, 1, '第一次 idle 发一条 agent 消息')
   handler({ agent: parent, status: 'idle' })
   handler({ agent: parent, status: 'idle' })
   await flush()
-  assert.equal(calls.injections.length + calls.followups.length, first + 2,
+  assert.equal(cardCount(), first + 2,
     '每次 idle 是一条独立汇报（worker 可以跑多个 turn），但不得因同一次 idle 重复')
 })
 
-test('wakeForegroundOnTurnEnd=false → 只 inject 不唤醒 head', async () => {
+test('悬空工具调用窗口里不插卡片（排队等 head 转 idle 补落盘）', async () => {
   const { ctx, calls, listeners, emitInsert, parent } = harness()
-  applyChain(ctx, { wakeForegroundOnTurnEnd: false })
+  applyChain(ctx, undefined)
   emitInsert(userMessage())
   await flush()
 
+  const headId = calls.agentsCreate[0].sessionId
+  const head = ctx.agents.get(headId)
+  // head 的日志末尾停在 `assistant(tool_calls)` 上（工具还在跑）：
+  // 往这种窗口里插 user/message 会把 tool_calls 与它的 tool/result 拆开，provider 会拒整条会话，
+  // 而且写坏是永久的（事实 13）。
+  head.session.deriveMessages = () => [
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] },
+  ]
   parent.session.snapshotEvents = () => [
     { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
-    { seq: 1, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'done' }] } }, time: NOW },
+    { seq: 1, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '真跑完了' }] } }, time: NOW },
     { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
   ]
-  const headId = calls.agentsCreate[0].sessionId
-  const before = calls.injections.length
+  const before = appendedCards(calls, headId).length
   listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
   await flush()
+  assert.equal(appendedCards(calls, headId).length, before, '悬空工具调用期间绝不能插卡片')
 
-  const added = calls.injections.slice(before).filter(entry => entry.agent === headId
-    && entry.message.content[0].text.includes('后台会话回复'))
-  assert.equal(added.length, 1, '关闭唤醒时仍然要 inject（head 下一个 step 读到）')
+  // 工具结束（不再悬空）→ head 转 idle 时补落盘
+  head.session.deriveMessages = () => [
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }] },
+    { role: 'user', source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'text', text: 'ok' }] },
+  ]
+  for (const handler of listeners.get('agent/status')) handler({ agent: head, status: 'idle' })
+  await flush()
+  const cards = appendedCards(calls, headId).filter(m => m.source.autofork === 'reply')
+  assert.equal(cards.length, 1, '不再悬空后必须补落盘')
+  assert.match(cards[0].content[0].text, /真跑完了/)
 })
 
 test('worker 刚建立、还没跑过 turn 时的 idle 不得被当成 turn 结束', async () => {
@@ -700,11 +875,15 @@ test('worker 刚建立、还没跑过 turn 时的 idle 不得被当成 turn 结�
   parent.session.snapshotEvents = () => [
     { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
   ]
-  const before = calls.injections.length + calls.followups.length
+  const headId = calls.agentsCreate[0].sessionId
+  const before = appendedCards(calls, headId).length
+  const sentBefore = calls.send.filter(entry => entry.agent === headId).length
   listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
   await flush()
-  assert.equal(calls.injections.length + calls.followups.length, before,
-    '没有 turn/end 就不算跑完过，不得注入')
+  assert.equal(appendedCards(calls, headId).length, before,
+    '没有 turn/end 就不算跑完过，不得投递任何消息')
+  assert.equal(calls.send.filter(entry => entry.agent === headId).length, sentBefore,
+    '也不得排进收件箱')
 
   parent.session.snapshotEvents = () => [
     { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
@@ -713,10 +892,10 @@ test('worker 刚建立、还没跑过 turn 时的 idle 不得被当成 turn 结�
   ]
   listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
   await flush()
-  const injected = [...calls.injections, ...calls.followups].filter(
-    entry => entry.message.content[0].text.includes('真跑完了'),
-  )
-  assert.equal(injected.length, 1, '真跑完后必须注入')
+  // head 还没有自己的 system/message ⇒ 回传排队（直接落盘会撞 protected first row）
+  const reply = calls.send.filter(entry => entry.agent === headId && entry.message.source.autofork === 'reply')
+  assert.equal(reply.length, 1, '真跑完后必须把结果投给 head')
+  assert.equal(reply[0].target, 'next-step')
 })
 
 
@@ -817,6 +996,8 @@ test('noticeSummaries=false → 注入消息退回整块呈现（不带 form/sum
   ctx.agents.get('session-parent').session.deriveMessages = safeMessages
 
   for (const entry of calls.injections) {
+    // `agent-message` 那条通道（分叉通知 / 在飞摘要）与 notice 折叠无关，跳过。
+    if (entry.message.source.kind === 'agent-message') continue
     assert.deepEqual(entry.message.source, { kind: 'plugin:dsh-autofork' })
   }
 
@@ -1815,3 +1996,298 @@ test('默认：**不做** B→A 的反向回灌（方向错了，纯噪声）', 
   )
 })
 
+
+/* ------------------------------ 手动分叉（forkMode） ------------------------------ */
+
+/**
+ * 调一次手动分叉的动作路由。
+ *
+ * 契约（与 Node half 的注释一一对应）：**必须带自定义头**（它是安全边界：自定义头让跨站
+ * 请求需要 CORS 预检），方法必须是 POST，体是 `{sessionId, messageId}`。
+ * @param {any[]} routes harness 捕获的路由。
+ * @param {object} [options] 覆盖点。
+ * @returns {Promise<{status: number, body: any}>} 状态码与响应体。
+ */
+async function callFork(routes, options = {}) {
+  const route = routes.find(candidate => candidate?.path === '/api/dsh-autofork/fork')
+  assert.ok(route !== undefined, '手动分叉路由必须已注册')
+  const method = options.method ?? 'POST'
+  const headers = options.headers ?? { 'x-dsh-autofork': '1' }
+  const body = options.body ?? ''
+  let text
+  const res = {
+    statusCode: 0,
+    setHeader() {},
+    end(chunk) { text = chunk },
+  }
+  const req = { method, headers, url: '/api/dsh-autofork/fork' }
+  // Node 的 IncomingMessage 是异步可迭代的；处理器读体走 for await。
+  req[Symbol.asyncIterator] = async function* iterate() {
+    if (body !== '') yield body
+  }
+  await route.handler(req, res)
+  return { status: res.statusCode, body: text === undefined ? undefined : JSON.parse(text) }
+}
+
+/** 把一条消息放进 agent 的待处理表（真实 Inbox 的读取面）。 */
+function queueMessage(parent, message, target = 'nextTurn') {
+  parent.inbox[target].push(message)
+  return message
+}
+
+test('手动模式：忙时收到用户指令不分叉——不建会话、消息留在队列里', async () => {
+  const { ctx, calls, emitInsert } = harness()
+  applyChain(ctx, { forkMode: 'manual' })
+  emitInsert(userMessage('m-manual'))
+  await flush()
+
+  assert.equal(calls.agentsCreate.length, 0, '手动模式不得在插入时建会话')
+  assert.equal(calls.removes.length, 0, '手动模式不得抢走队列里的消息（它要留给用户点分叉）')
+})
+
+test('手动模式：点「分叉」才分叉——动作路由把那条排队指令摘出去建 head', async () => {
+  const { ctx, calls, emitInsert, parent } = harness()
+  applyChain(ctx, { forkMode: 'manual' })
+  const message = queueMessage(parent, userMessage('m-manual'))
+  emitInsert(message)
+  await flush()
+  assert.equal(calls.agentsCreate.length, 0)
+
+  const response = await callFork(calls.routes, {
+    body: JSON.stringify({ sessionId: 'session-parent', messageId: 'm-manual' }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.body.ok, true)
+  assert.equal(calls.agentsCreate.length, 1, '点了分叉才建会话')
+  assert.equal(calls.agentsCreate[0].sessionId, response.body.sessionId)
+  assert.deepEqual(calls.removes, ['m-manual'], '要把这条消息从队列里摘走')
+  assert.deepEqual(calls.followups.map(entry => entry.agent), [response.body.sessionId],
+    '这条指令要成为新会话的开场白')
+  assert.equal(ctx.agents.get(response.body.sessionId) !== undefined, true)
+})
+
+test('动作路由：缺自定义头 / 非 POST / 坏 JSON / 缺字段 / 体过大 一律拒绝且不建会话', async () => {
+  const { ctx, calls, parent } = harness()
+  applyChain(ctx, { forkMode: 'manual' })
+  queueMessage(parent, userMessage('m-manual'))
+
+  const noHeader = await callFork(calls.routes, { headers: {}, body: JSON.stringify({ sessionId: 'session-parent', messageId: 'm-manual' }) })
+  assert.equal(noHeader.status, 403, '缺自定义头必须拒（否则任何网页都能对本地端口发起分叉）')
+
+  const wrongMethod = await callFork(calls.routes, { method: 'GET' })
+  assert.equal(wrongMethod.status, 405)
+
+  const badJson = await callFork(calls.routes, { body: '{' })
+  assert.equal(badJson.status, 400)
+
+  const missing = await callFork(calls.routes, { body: JSON.stringify({ sessionId: 'session-parent' }) })
+  assert.equal(missing.status, 400)
+
+  const tooLarge = await callFork(calls.routes, { body: 'x'.repeat(5000) })
+  assert.equal(tooLarge.status, 413)
+
+  assert.equal(calls.agentsCreate.length, 0, '任何被拒的请求都不得建会话')
+  assert.equal(calls.removes.length, 0, '任何被拒的请求都不得动队列')
+  assert.equal(parent.inbox.nextTurn.length, 1, '消息必须原样留在队列里')
+})
+
+test('动作路由：非手动模式 / 会话不在跑 / 不忙 / 消息不在队列 / 没有开着 turn 都拒绝', async () => {
+  // 自动模式：动作路由必须不认（否则用户能在两种模式之间绕开语义）。
+  const auto = harness()
+  applyChain(auto.ctx, { forkMode: 'auto' })
+  queueMessage(auto.parent, userMessage('m-manual'))
+  const autoResult = await callFork(auto.calls.routes, {
+    body: JSON.stringify({ sessionId: 'session-parent', messageId: 'm-manual' }),
+  })
+  assert.equal(autoResult.status, 409)
+  assert.equal(autoResult.body.error, 'not-manual-mode')
+
+  // 会话不存在。
+  const missingAgent = harness()
+  applyChain(missingAgent.ctx, { forkMode: 'manual' })
+  const missingResult = await callFork(missingAgent.calls.routes, {
+    body: JSON.stringify({ sessionId: 'session-nope', messageId: 'm-manual' }),
+  })
+  assert.equal(missingResult.status, 404)
+  assert.equal(missingResult.body.error, 'agent-not-running')
+
+  // agent 空闲（此刻它自己就能作答，没有"忙"这回事）。
+  const idle = harness({ parentStatus: 'idle' })
+  applyChain(idle.ctx, { forkMode: 'manual' })
+  queueMessage(idle.parent, userMessage('m-manual'))
+  const idleResult = await callFork(idle.calls.routes, {
+    body: JSON.stringify({ sessionId: 'session-parent', messageId: 'm-manual' }),
+  })
+  assert.equal(idleResult.status, 409)
+  assert.equal(idleResult.body.error, 'agent-not-busy')
+
+  // 消息已被 loop 领走（或早已分叉过）：只认当前事实，不信客户端手里的 id。
+  const gone = harness()
+  applyChain(gone.ctx, { forkMode: 'manual' })
+  const goneResult = await callFork(gone.calls.routes, {
+    body: JSON.stringify({ sessionId: 'session-parent', messageId: 'm-stale' }),
+  })
+  assert.equal(goneResult.status, 409)
+  assert.equal(goneResult.body.error, 'not-queued')
+
+  // 没有开着的 turn：压根没有"在飞"可分叉。
+  const noTurn = harness({ projection: { openTurnStartSeq: null, lastTurn: 2 } })
+  applyChain(noTurn.ctx, { forkMode: 'manual' })
+  queueMessage(noTurn.parent, userMessage('m-manual'))
+  const noTurnResult = await callFork(noTurn.calls.routes, {
+    body: JSON.stringify({ sessionId: 'session-parent', messageId: 'm-manual' }),
+  })
+  assert.equal(noTurnResult.status, 409)
+  assert.equal(noTurnResult.body.error, 'no-open-turn')
+
+  // 家族上限：与自动模式同一道闸门（参数语义不因模式而变）。
+  const capped = harness()
+  applyChain(capped.ctx, { forkMode: 'manual', maxActiveBranches: 0 })
+  queueMessage(capped.parent, userMessage('m-manual'))
+  const cappedResult = await callFork(capped.calls.routes, {
+    body: JSON.stringify({ sessionId: 'session-parent', messageId: 'm-manual' }),
+  })
+  assert.equal(cappedResult.status, 409)
+  assert.equal(cappedResult.body.error, 'family-cap')
+  assert.equal(capped.calls.agentsCreate.length, 0)
+  assert.equal(capped.parent.inbox.nextTurn.length, 1, '被上限挡住时消息必须留在队列里')
+})
+
+test('forkMode 是 volatile 引用时按**当前值**判定：改完立刻生效，不重启不重挂载', async () => {
+  // 宿主把 `.volatile()` 叶子注入成 `{ get() }` 引用，改配置时原地换值——所以判定必须现取。
+  let mode = 'manual'
+  const ref = { get: () => mode }
+  const { ctx, calls, emitInsert } = harness()
+  applyChain(ctx, { forkMode: ref })
+
+  emitInsert(userMessage('m-1'))
+  await flush()
+  assert.equal(calls.agentsCreate.length, 0, '引用说 manual：不得分叉')
+
+  mode = 'auto'
+  emitInsert(userMessage('m-2'))
+  await flush()
+  assert.equal(calls.agentsCreate.length, 1, '引用改成 auto 后必须立刻分叉（无需重启）')
+})
+
+test('forkMode 非法值退回 auto——绝不因为一个坏配置让分叉消失', async () => {
+  const { ctx, calls, emitInsert } = harness()
+  applyChain(ctx, { forkMode: '并发' })
+  emitInsert(userMessage())
+  await flush()
+  assert.equal(calls.agentsCreate.length, 1)
+})
+
+test('params：volatile 引用被解引用成当次的值（health / 日志里不得出现引用对象）', async () => {
+  const resolved = resolveParams({ forkMode: { get: () => 'manual' } })
+  assert.equal(resolved.forkMode, 'manual')
+  assert.equal(forkModeOf({ forkMode: { get: () => 'manual' } }, resolved), 'manual')
+  assert.equal(forkModeOf(undefined, { forkMode: 'manual' }), 'manual', '没有引用时用已解析的参数兜底')
+  assert.equal(forkModeOf({ forkMode: { get: () => '乱码' } }, { forkMode: 'manual' }), 'auto',
+    '引用里的非法值同样退回 auto')
+
+  const { ctx, calls } = harness()
+  applyChain(ctx, { forkMode: { get: () => 'manual' } })
+  const body = await callHealth(calls.routes, 'sessionId=session-parent')
+  assert.equal(body.mode, 'manual', 'health 必须报告当前生效的分叉方式（客户端据此决定要不要挂按钮）')
+  assert.equal(body.params.forkMode, 'manual')
+  assert.equal(typeof body.params.forkMode, 'string')
+})
+
+test('条目 Config：volatile 叶子按 schema 注入，非 volatile 配置**原样保留**（不被校验剥掉）', () => {
+  // 这一条钉的是**宿主装载路径**的事实，不是我们的实现口味：
+  //  · `.volatile()` 叶子在 apply 拿到的 config 里是 `{ get() }` 引用；
+  //  · schema 非 strict，`forkMode` 之外的键（其余参数）必须原样留给我们自己的 resolveParams。
+  const withRef = Config({ forkMode: 'manual', minStepAgeMs: 1234, 未来参数: true })
+  assert.equal(typeof withRef.forkMode.get, 'function', 'volatile 叶子必须是引用')
+  assert.equal(withRef.forkMode.get(), 'manual')
+  assert.equal(withRef.minStepAgeMs, 1234, '非 volatile 的已知参数不得被剥掉')
+  assert.equal(withRef['未来参数'], true, 'schema 未声明的键也必须留着（向前兼容）')
+  assert.equal(resolveParams(withRef).minStepAgeMs, 1234)
+  assert.equal(resolveParams(withRef).forkMode, 'manual', 'params 里必须是解引用后的值')
+
+  const byDefault = Config({})
+  assert.equal(byDefault.forkMode.get(), 'auto', '没配过时缺省是自动分叉（出厂行为不变）')
+  assert.equal(resolveParams(byDefault).forkMode, 'auto')
+})
+
+/* -------------------- 注入内容的呈现：一等助手回复（卡片） -------------------- */
+
+test('三条消息的投递：两张卡 next-step、用户指令开场本轮 ⇒ **一次 turn / 一次模型请求**', async () => {
+  // 用户实测报的 bug：三条消息各自开场一个 turn ⇒ 三次模型请求。根因是
+  // `ReactLoopInbox.claim` 的粒度（next-turn 每轮只认领 1 条）。
+  // 现在两张卡走 next-step（与用户指令同一批认领），只有用户指令进 next-turn 开场本轮 turn。
+  const { ctx, calls, listeners, emitInsert, parent } = harness()
+  applyChain(ctx, undefined)
+  emitInsert(userMessage())
+  await flush()
+
+  const headId = calls.agentsCreate[0].sessionId
+  const sent = calls.send.filter(entry => entry.agent === headId)
+  assert.equal(sent.length, 2, '分叉那一刻投出两张卡')
+  assert.deepEqual(sent.map(entry => [entry.target, entry.wakeup]), [['next-step', false], ['next-step', false]])
+  assert.deepEqual(sent.map(entry => entry.message.source.autofork), ['notice', 'digest'])
+  assert.equal(calls.followups.length, 1, '只有用户那条指令唤醒 head（= 只开场一个 turn）')
+  assert.equal(calls.followups[0].agent, headId)
+
+  // 后台跑完后的第三条：head 还没开口 ⇒ 也走 next-step（直接落盘会撞 protected first row）
+  parent.session.snapshotEvents = () => [
+    { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
+    { seq: 1, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '结论' }] } }, time: NOW },
+    { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
+  ]
+  listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
+  await flush()
+  const reply = calls.send.filter(entry => entry.agent === headId && entry.message.source.autofork === 'reply')
+  assert.equal(reply.length, 1, 'head 还没有 system/message ⇒ 回传排队等它开第一轮')
+  assert.equal(reply[0].target, 'next-step')
+
+  // head 开口之后再回传一条 ⇒ 直接落盘（卡片立刻出现，且不多跑一轮）
+  const head = ctx.agents.get(headId)
+  head.session.snapshotEvents = () => [
+    { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
+    { seq: 1, type: 'system/message', data: { turn: 1, step: 1 }, time: NOW },
+    { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
+  ]
+  listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
+  await flush()
+  const cards = appendedCards(calls, headId)
+  assert.equal(cards.length, 1, 'head 开口后回传直接落盘')
+  assert.equal(cards[0].source.autofork, 'reply')
+  assert.equal(cards[0].source.kind, 'agent-message', 'kind 保住官方来源标签')
+  assert.equal(cards[0].source.form, 'relay', 'form 保住展开后的正文结构')
+  assert.equal(cards[0].source.senderSessionId, 'session-parent', 'sender 让"来自会话 X"可读')
+  assert.equal(cards[0].role, 'user', 'relay 消息在模型侧是 user 角色')
+  assert.match(cards[0].content[0].text, /^分叉会话 session-parent 发来消息：/,
+    '必须带来源前缀，否则模型会把它误当成用户本人说的话')
+  // 全程只唤醒一次 ⇒ 只会开场一个 turn ⇒ 一次模型请求
+  assert.equal(calls.followups.filter(entry => entry.agent === headId).length, 1)
+})
+
+test('受保护首行：head 还没有 system/message 时绝不直接落盘（否则整条日志 corrupt）', async () => {
+  // 会话格式要求一条会话的**第一条消息**是它自己的 system prompt。插在它之前写入端**不报错**、
+  // 宿主照跑，只有重新打开这条会话时读取端才拒：
+  //   SessionFormatError: system/message requires a protected first row
+  // 真 GUI 实测踩到过（界面上 Failed to load history … is corrupt）。
+  const { ctx, calls, listeners, emitInsert, parent } = harness()
+  applyChain(ctx, undefined)
+  emitInsert(userMessage())
+  await flush()
+
+  const headId = calls.agentsCreate[0].sessionId
+  const head = ctx.agents.get(headId)
+  // 刚建的 head：日志里只有 permission/preset 这类非消息事件
+  head.session.snapshotEvents = () => [{ seq: 0, type: 'permission/preset', data: { preset: 'workspace-write' }, time: NOW }]
+  parent.session.snapshotEvents = () => [
+    { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
+    { seq: 1, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '结论' }] } }, time: NOW },
+    { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
+  ]
+  listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
+  await flush()
+
+  assert.equal(appendedCards(calls, headId).length, 0, '没有 system/message 就绝不能直接落盘')
+  assert.equal(calls.send.filter(entry => entry.agent === headId && entry.message.source.autofork === 'reply').length, 1,
+    '改走 next-step，等它开第一轮时落在 system/message 之后')
+})

@@ -17,6 +17,51 @@ export const BRANCH_STATES = /** @type {const} */ ([
 ])
 
 /**
+ * 分叉触发方式（`forkMode` 的取值域）。
+ *
+ * - `'auto'`：忙时收到用户指令**立刻**分叉（本插件的原始行为，出厂默认）。
+ * - `'manual'`：指令照常入队（不中止、不分叉），等用户在队列那条指令上点「分叉」才分叉。
+ *
+ * 两种方式只改"何时分叉"，不改分叉本身的语义（seed / digest / 回注 / 命名全同）。
+ */
+export const FORK_MODES = /** @type {const} */ (['auto', 'manual'])
+
+/** 出厂分叉方式；非法值一律归到它，绝不因为一个坏配置让分叉消失。 */
+export const DEFAULT_FORK_MODE = 'auto'
+
+/**
+ * 这个值是不是宿主注入的 volatile 配置引用。
+ *
+ * 宿主把条目 Config 里标了 `.volatile()` 的叶子替换成 `createVolatile()` 造的引用
+ * （唯一自有键 `get`，其余是符号键），改配置时**原地换值、不重挂载**。判据与
+ * `@deepseek-ai/cosmokit` 的 `isVolatile` 等价（自有键只有 `get`），但不 import 官方包
+ * ——分发契约不允许声明 `@deepseek-ai/*` 依赖。
+ * @param {unknown} value 待判定的值。
+ * @returns {boolean} 是否是 volatile 引用。
+ */
+export function isVolatileRef(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && typeof (/** @type {any} */ (value).get) === 'function'
+    && Object.keys(value).length === 1
+}
+
+/**
+ * 取当前生效的分叉方式。
+ *
+ * **必须每次调用现取，不能把值缓进局部变量**：`.volatile()` 的意义就是"改完立刻生效、
+ * 不重挂载"，缓存一次就退回"改完要重启"。
+ * @param {unknown} config 条目配置（真实宿主里 `forkMode` 是 volatile 引用）。
+ * @param {{ forkMode?: unknown } | undefined} params 已解析的参数（测试/无引用时的兜底）。
+ * @returns {'auto' | 'manual'} 生效的分叉方式。
+ */
+export function forkModeOf(config, params) {
+  const raw = isVolatileRef(/** @type {any} */ (config)?.forkMode)
+    ? /** @type {any} */ (config).forkMode.get()
+    : params?.forkMode
+  return FORK_MODES.includes(/** @type {any} */ (raw)) ? /** @type {any} */ (raw) : DEFAULT_FORK_MODE
+}
+
+/**
  * 默认参数。每个字段都可被插件配置覆盖。
  *
  * 命名约定：`Ms` 结尾是毫秒，`Chars` 结尾是字符预算，`Max` 前缀是上限。
@@ -25,6 +70,14 @@ export const DEFAULT_PARAMS = {
   // ---- 触发 ----
   /** 总开关；false 时彻底不建分叉，全部按 steer/queue 原样投递。 */
   enabled: true,
+  /**
+   * 分叉方式：`'auto'`（默认，忙时立即分叉）或 `'manual'`（指令先入队，点「分叉」才分叉）。
+   *
+   * **这是唯一在 Plugins 页可改的字段**（条目 Config 里标了 `.volatile()`），改完立刻生效、
+   * 不重启、不重挂载；其余参数仍只走插件配置 / 环境变量。这里的值是**解析时刻的快照**，
+   * 判定一律走 `forkModeOf()` 现取（见该函数的注释）。
+   */
+  forkMode: DEFAULT_FORK_MODE,
   /**
    * 分叉门槛：当前 step 已运行**低于**此时长则不分叉。**默认 0 = 只要忙就分叉。**
    *
@@ -67,8 +120,6 @@ export const DEFAULT_PARAMS = {
   reInjectOnTurnEnd: true,
   /** 回注内容的字符上限。 */
   reInjectMaxChars: 4000,
-  /** 前台处于 idle 时，是否用 followup 唤醒它去看回注结果。 */
-  wakeForegroundOnTurnEnd: true,
 
   // ---- 容器形态 ----
   /**
@@ -277,6 +328,10 @@ export function resolveParams(config, env = process.env) {
 
 /**
  * 把已知键写入目标对象；未知键与 undefined 一律忽略。
+ *
+ * volatile 叶子（见 `isVolatileRef`）在这里**解引用成当次的值**，否则 `params.forkMode`
+ * 会是一个 `{ get() }` 引用对象，日志、health 输出与 `describeParams()` 都会被它污染。
+ * 实时判定另有 `forkModeOf()`，它拿的是引用本身。
  * @param {Record<string, unknown>} target 目标参数对象。
  * @param {unknown} source 来源（配置对象或解析后的 JSON）。
  * @returns {void}
@@ -285,13 +340,15 @@ function applyKnownKeys(target, source) {
   if (source === null || typeof source !== 'object') return
   for (const key of Object.keys(DEFAULT_PARAMS)) {
     const value = /** @type {Record<string, unknown>} */ (source)[key]
-    if (value !== undefined) target[key] = value
+    if (value === undefined) continue
+    target[key] = isVolatileRef(value) ? /** @type {any} */ (value).get() : value
   }
 }
 
 /** 在日志/回注文本里标注参数来源，便于排查"为什么没分叉"。 */
 export function describeParams(params) {
   return [
+    `forkMode=${params.forkMode}`,
     `minStepAge=${params.minStepAgeMs}ms`,
     `coalesce=${params.coalesceWindowMs}ms`,
     `maxActiveBranches=${params.maxActiveBranches}`,

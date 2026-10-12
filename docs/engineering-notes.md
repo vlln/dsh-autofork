@@ -51,35 +51,40 @@ seed、血缘存储）；④ 设计要点与不变量。
 | 面 | 内容 |
 |---|---|
 | 触发 | `agent/inbox/inserted` + `inbox.remove()` CAS —— **只在 agent 忙（无法立刻被打断）时**分叉；空闲时消息照旧由当前会话回答 |
+| 方式 | `forkMode`：`'auto'`（默认，忙时立刻分叉）或 `'manual'`（指令先入队，点队列行上的「分叉」才分叉）——**唯一在 Plugins 页可改的字段**，改完立刻生效 |
 | 切点 | 最后一个 `turn/end` 作为 seed 边界（在飞 turn 不继承，由确定性渲染的「在飞摘要」承载） |
 | 继承 | 新会话是**普通顶层会话**（不是 subagent 子会话），带旧会话的已完成前缀 ⇒ 转写连续 |
 | 焦点 | 分叉后把客户端焦点交付到新会话（两阶段：先提供候选，客户端确认切换成功才 ack） |
-| 回注 | 旧会话转 idle → 它这一 turn 的结果渲染后注入新会话 |
+| 回注 | 旧会话转 idle → 它这一 turn 的结果**写成一等助手回复**落到新会话（用户看到助手卡片） |
 | 血缘 | 写进 DSH 官方存储域（`<DSH_HOME>/storages/autofork_lineage/`），**重启不丢**；工具与页签都读它 |
 | 命名 | 新会话被命名为 `⑂n <家族根名>`（走原生 `sessionTitle.rename`，与手动重命名同一条路） |
-| 界面 | 「分叉」页签（血缘树 + 点击跳转）+ 三行可折叠的注入摘要 |
+| 界面 | Plugins 页的「分叉方式」设置卡片 + 「分叉」页签（血缘树 + 点击跳转）+ 队列行上的「分叉」按钮 + 三条**助手卡片**（分叉通知 / 在飞摘要 / 后台回注） |
 | 调度 | `fork_list` / `fork_steer` / `fork_cancel` 三个工具 |
 
 ## 验证
 
 ```sh
-npm run verify     # 语法（6 个发行文件 + 4 个 E2E 脚本）+ 3 道静态门禁 + 123 项自证测试
+npm run verify     # 语法（6 个发行文件 + 4 个 E2E 脚本）+ 3 道静态门禁 + 143 项自证测试
 ```
 
 | 层 | 证据 |
 |---|---|
 | `npm test`·纯函数 | digest 的**确定性**（逐字节可复现、无时间戳/随机）与**有界性**（超预算显式标注丢弃量，且只让人类消息进固定保留区）；工具层**授权边界**（无 agent 上下文必须拒绝、调用者 id 必须透传、`keepInbox` 只认严格 `true`） |
-| `npm test`·apply() 级 | 桩测试驱动**真实入口**：主路径（CAS 抢占 → seed 切点 → 注入通知 + digest → `followup` 投递）、**空 seed 主场景**、6 条拒绝路径、结果回注、创建期 idle、授权边界 |
+| `npm test`·apply() 级 | 桩测试驱动**真实入口**：主路径（CAS 抢占 → seed 切点 → 注入通知 + digest → `followup` 投递）、**空 seed 主场景**、6 条拒绝路径、结果回注、创建期 idle、授权边界；**手动分叉**：插入时不建会话/不抢消息、动作路由才分叉、7 条拒绝路径（缺头 / 非 POST / 坏 JSON / 缺字段 / 体过大 / 非手动 / 不忙 / 消息不在队列 / 没开 turn / 撞上限）、volatile 引用改成 `auto` 后**立刻**分叉（不重启）、非法值退回 `auto` |
+| `npm test`·client 渲染 | 用 React 桩渲染**真实 bundle**：设置卡片注册进 `plugins.bundle.config` 且 key = 包名（命名空间断言在桩 `configForms.get` 里钉的是条目 id）、点选项写的是 `{op:'set', path:['forkMode'], value:'manual'}`、已选中项不重复写、`summary` 视图与命名空间不可用两条分支；「分叉」按钮**挂载点就是那一行**（两条排队指令 → 两个 portal，容器分别对应两行）、点击发的请求体是**点的那一条**、非手动模式/没有排队/本地回声都不挂、拿不到 `react-dom` 时退回右对齐回退条且仍能点击 |
 | `npm run gate` 门禁 1 | **严格注入完整性**：顶层 `inject` 只放真正必需的服务（2 项），可选能力必须走嵌套 `ctx.inject`（`dsh-base` 之外的服务缺席时，只让那项能力缺席，而不是让整棵树起不来） |
 | `npm run gate` 门禁 2 | **参数文档不漂移**：README 参数表与 `DEFAULT_PARAMS` 键集双向一致 |
 | `npm run gate` 门禁 3 | **client bundle 契约**：调用 `__ModuleLoader__.load`、`id` 与包名一致、导出 `name`/`inject`/`apply` |
-| **挂载（真实实例）** | `DSH_HOME=/tmp/dsh-autofork-home dsh web --port 0 --no-open` → 无 `plugin tree failed to load`；health 探针 → `200 {"ok":true,"tools":[…],"params":{…25 项…},"nodes":[…]}` |
-| **client bundle（真实实例）** | boot payload 含 `{"id":"@vlln/dsh-autofork","url":"/plugins/??@vlln/dsh-autofork/client.js&rev=…"}`；该 URL → `200` / 28192 字节（含 `conversation.view` / `'分叉'`） |
+| **挂载（真实实例）** | 隔离 profile + 随机端口 `dsh web --port 0 --no-open` → 无 `plugin tree failed to load`；health 探针 → `200 {"ok":true,"mode":"auto","tools":[…],"params":{…26 项…}}` |
+| **设置在 Plugins 页（真实实例）** | profile patch 写 `config: {forkMode: manual}` → 重启后 health 报 `mode:"manual"`、`params.forkMode:"manual"`，动作路由的模式闸门随之打开（`not-manual-mode` → `agent-not-running`）——**同一形状就是设置页写下的那一份**；同一实例上缺自定义头 → `403`，带头 → `409` |
+| **client bundle（真实实例）** | boot payload 的插件行含 `@vlln/dsh-autofork/client.js`（带 `rev=`）；该 URL → `200` / 965704 字节（整行合并产物），其中含 `plugins.bundle.config` / `/api/dsh-autofork/fork` / `data-queue-dock` / `useForkSettings` |
+| **卡片化（真 GUI，CDP 驱动）** | 隔离 home + 真模型 + headless Chrome（CDP）：headless SDK 跑「忙时插第二条 → 自动分叉」造出 head，再在 GUI 里只读打开。head 日志 `turn/start: [1]`、只有一次 `request/header`（**一次请求**），两张卡落在 `system/message` **之后**、用户消息之前，回传卡在 `turn/end` 之后追加；DOM 里三张 `[data-dsh-autofork-card]` 分别是「分叉通知 / 在飞进度 / 后台会话回复」，展开显示「来自会话 <源>」+ 正文；合成的那个坏会话则报 `Failed to load history … SessionFormatError`（protected first row）|
+| **provider 对"连续两条 assistant"的容忍** | 真 API 直连：`messages=[user, assistant, assistant]` → `200`（模型推理里读到了两条）。这是回注卡片到达时前面没有用户消息的形状 |
 | **行为层（真实 harness）** | `dsh --profile sdk`（stdio JSON-RPC）+ 官方 `llm-mock-server`（**不需要模型凭据**）驱动一次真实对话：父分叉的 step 挂住 → 第二条指令到达 → `forkDetected / digestInjected / noticeInjected / instructionDelivered` **全为 true**，且父分叉仍在 `running` 时子分叉已 `running → idle` 完成响应；同一场景验证**分叉命名**：`title.assigned "⑂1 <根标题>"`（序号只来自持久化血缘表，`title.ordinal {max, next, lineage}` 三者一致） |
 | **血缘持久化（真实 harness，两进程）** | 进程 1（headless）分叉 → 盘上出现 `storages/autofork_lineage/edges/<head>.json`；进程 2（**全新 `dsh web` 实例**，随机端口）`GET /api/dsh-autofork/health?sessionId=<head>` 返回整棵树：根（标题由孩子的 `base` 反推）+ `⑂1 …`（`depth 1` / `parentId` / `current`）。同一场景里 head 的真实 turn 调 `fork_list`，`tool/result` 渲染出 `↑ 我接管的`（`isError:false` ⇒ 封闭的 `output.schema` 过得了运行时校验） |
-| 未验证（只能靠人眼） | **「分叉」页签是否真的出现在 tab 栏、点击是否真的切了会话**、**焦点是否真的切换**、转写是否连续、折叠是否真的折叠——服务端只能验到 bundle 200 + 事件形状 + `nodes` 的形状 |
+| 未验证（只能靠人眼） | **「分叉」页签是否真的出现在 tab 栏、点击是否真的切了会话**、**焦点是否真的切换**、转写是否连续、折叠是否真的折叠、**设置卡片是否真的画在 dsh-autofork 的包页上、点选是否真的落库到 profile patch**、**「分叉」按钮是否真的画在队列那一行右侧**——服务端只能验到 bundle 200 + 事件形状 + `nodes`/`mode` 的形状 |
 
-行为层证据跑在**已发布的 `dsh 0.1.2-rc.1`** 上（本机源码检出的 `node_modules` 不完整，未做基线 worktree 复验）。
+行为层证据跑在**已发布的 `dsh 0.1.2-rc.1`** 上（本机源码检出的 `node_modules` 不完整，未做基线 worktree 复验）；**手动分叉与设置面**的验证跑在 **`dsh 0.2.0-rc.2`**（本机 GUI 用的就是它）。
 
 ### 行为层复现（台子在 [`tests/e2e/`](../tests/e2e/README.md)，但不进 `npm run verify`）
 
@@ -174,8 +179,99 @@ mock 不校验消息顺序，它复现的是"顺序被写坏"这个事实本身�
 | 子分叉组合 | `ctx.agentPresets.composeFrom(agentCtx, parentCtx)`——加入父分叉同一份 standing composition |
 | 上下文注入 | `agent.inject(UserMessage)`（不唤醒）+ `agent.followup(UserMessage)`（唤醒） |
 | 回注触发 | 子分叉 `agent/status` 转 `idle` |
+| 设置在 Plugins 页 | 条目 `Config` 里标 `.volatile()` 的叶子 = 可编辑面；设置命名空间 = **Loader 条目 id**（`dsh-autofork`），而 `plugins.bundle.config` 槽的 key = **包名**（`@vlln/dsh-autofork`）——两者不同 |
+| 手动分叉的动作 | `POST /api/dsh-autofork/fork`（本插件自己的 webServer 路由，需自定义头 `x-dsh-autofork`）——分叉不是 session-controller 的能力，第三方也注册不了官方 remote |
 
-### 消息形状（会话格式 v4 的硬要求）
+### 手动分叉（`forkMode: 'manual'`）
+
+**语义**：忙时收到用户指令**什么都不做**（消息照常留在 inbox 里排队），把"何时分叉"交给用户；
+`POST /api/dsh-autofork/fork` 带着 `{sessionId, messageId}` 到达时才走 `forkNow()`。两种方式
+共用同一条建分叉路径（门槛判定 → `inbox.remove()` CAS → `spawnHead`），只改触发时机。
+
+**判据只认当前事实**，不信客户端手里的 id——消息必须**此刻**仍在那个 agent 的
+`agent.inbox.nextTurn` / `nextStep` 里（真实 `Inbox` 的读取面），否则一律 409：客户端可能拿着
+一条已被 loop 领走、或早已被分叉过的 id 来按第二次。拒绝路径：非手动模式 / 会话不在（404）/
+不忙 / 消息不在队列 / 没有开着 turn / 撞家族上限——**每一条都不动队列、不建会话**。
+
+**安全边界是那个自定义请求头**：自定义头让跨站请求需要 CORS 预检，而本路由不回应预检 ⇒
+任何网页都无法对本地端口发起分叉（没有自定义头的 JSON POST 本来算"简单请求"，可以绕过同源
+策略）。头名字面量是分发契约，改它要同步客户端。注意信任级别：本地进程伪造这个头是拦不住的
+（health 探针本就同级别），它挡的是**跨站浏览器**。
+
+**落点与生效**：写进 profile 的 `cordis.patch.yml`
+（`- id: dsh-autofork` + `config.forkMode`），重启后仍在；`.volatile()` 叶子在宿主里是
+`{ get() }` 引用，宿主改配置时**原地换值、不重挂载**，所以判定必须每次现取
+（`src/params.mjs` 的 `forkModeOf`），非法值一律退回 `'auto'`——绝不因为一个坏配置让分叉消失。
+
+### 队列行上的「分叉」按钮（DOM 门户）
+
+队列行右侧那几个按钮（编辑 / 删除 / 转向）**写死在官方 `QueueDock` 里**，`QueueAction` 也是
+`edit | remove | steer` 的封闭联合；插件层既没有"往队列行加动作"的槽，也无法接管或包裹别人
+已注册的槽条目（注册绑在各自 fiber 上）。所以按钮走的是**插件侧自造缝**：
+
+- 注册进官方 `conversation.input.dock`（list 槽）**只借一个挂载时机**，组件本身不画在这一列里；
+- 用 `react-dom` 的 `createPortal` 把按钮挂进 `[data-queue-dock] li` 那一行（非公开 DOM 契约）；
+- 队列行与按钮**同一顺序**：`queuedForkables()` 逐条复刻 `QueueDock` 的过滤规则
+  （剔除 `placement === 'transcript'` 的本地回声），本地回声（`'queued'`，还没有宿主消息 id）
+  不进表——按钮只出现在宿主真的收下了的那条上；
+- **失败模式一律是"不出现"，不是"做错事"**：DOM 结构变了 / 队列面板收起（多于一条时行整体不在
+  DOM 里）/ 没有 `react-dom` → 退回自己画一条**右对齐的回退条**（每条一个按钮，功能不减）；
+- 整页 DOM 变化（流式输出）不重渲染本组件：`MutationObserver` 只在**队列 dock 子树**变动时
+  才触发重渲染。
+
+
+### 注入内容的呈现：插件自画的**消息卡**（一次请求、三样都看得见）
+
+**目标演进**（用户三轮反馈，逐条钉下来的）：① 三条消息（分叉通知 / 在飞摘要 / 后台回传）要长得像
+DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占一轮**——用户实测报"每张卡都独立请求了
+一次模型响应"；③ 所以最终形态是"三条都渲染 + 只跑一次模型请求"。
+
+**四条硬约束**（全部来自读源码 + 真 GUI 实测，缺一条就出问题）：
+
+1. **一个 turn 只由一条 `next-turn` 消息开场**（`ReactLoopInbox.claim`）：
+   ```js
+   claim(target, turn) {
+     const claimed = mutate('next-step', 0, nextStep.length, [])          // 整批全认领
+     if (target === 'next-turn') claimed.push(...mutate('next-turn', 0, 1, []))  // 只认领 1 条
+   }
+   ```
+   三条都塞 next-turn ⇒ **三个 turn = 三次模型请求**（就是用户报的 bug）。
+2. **会话的第一条消息必须是它自己的 `system/message`**（protected first row）。在它之前 `append`
+   任何 `user/message` 都让整条日志 **corrupt**，而且**写入端不报错、宿主照跑**——只有重新打开
+   这条会话时读取端才拒：`SessionFormatError: system/message requires a protected first row`
+   （界面：`Failed to load history … is corrupt`）。head 是刚建的，system/message 要等它第一轮
+   step 1 才写 ⇒ **不能在分叉那一刻直接落盘**。
+3. **客户端的卡片判定**（`ui-chat` 的 input-message 定义）只认两种：
+   `waking = nextTurn.currentClaimed.has(id) || idleSteer`。而 `idleSteer` 要求"本轮不是被队列
+   消息开场、且批里没有人类消息"——用户那条指令必然同批 ⇒ 走 next-step 的两条卡会被渲染成
+   **不可见的上下文**（`isVisibleChatNode` 对 `context` 只在带工具增删时才显示）。
+   ⇒ **可见性不能依赖官方判据**。
+4. **turn 内的节点默认是"过程成员"**：`TURN_PROCESS_INDEPENDENT_KINDS` 是**硬编码集合**
+   （`system-prompt/user/steering/turn-trigger/turn-process/turn-error/turn-max-tokens/turn-tail`），
+   插件自己的 kind 不在里面 ⇒ 会被折进那个可折叠的 "Completed in …" 分组里（实测：卡片被折叠、
+   `innerText` 都取不到）。
+
+**最终做法**：
+
+| 环节 | 做法 |
+|---|---|
+| 投递 | 两张卡走 `agent.send(msg, 'next-step', false)`，与用户那条指令**同一个 step 边界整批认领** ⇒ 落在 head 首轮 `system/message` **之后**、`在用户气泡之前**；**一次 turn / 一次模型请求** |
+| 卡片本体 | 本插件的**客户端节点定义**：`ctx.uiConversation.events.register({kind:'autofork-message', target:'chat', match/start/update/buildViewNode})` + 槽 `conversation.chat.node` 的 keyed 视图（官方 `ui-goal` 同一套 API）。宿主在 `source` 上打了 `autofork: 'notice'\|'digest'\|'reply'` 标记，客户端只认这三条，不抢别人的 agent 消息 |
+| 节点 `location` | **显式 `{kind:'unresolved'}`** —— 否则被当成 turn 的过程成员折叠掉（约束 4）；显示顺序仍由 `anchorSeq`（= 事件 seq）决定，所以仍是"通知 → 摘要 → 用户指令" |
+| 槽注册 | `slots.inject('conversation.chat.node', () => slots.register({name, key}, View))`——**必须包在 `inject` 里**；直接 `register` 会静默不生效，宿主渲染它自带的 fallback（实测：一行 `Unknown surface event: autofork-message`） |
+| 外观 | CSS 逐条照抄官方 `TurnTriggerNodeView.module.css`（`.5px` 边框 + `--dsw-radius-xl` + 主题背景 + 12/16 留白 + 折叠箭头），图标用官方 agent 图标 `IconPaperPlaneOutlineRegular` |
+| 后台回传 | head **已经开过口**（日志里有 `system/message`）⇒ 直接 `append` 成卡片（立刻出现、**不唤醒**、不多跑一轮）；还没开口 ⇒ 进 next-step 等它第一轮；撞上**悬空工具调用**窗口 ⇒ 排队等 idle 补落盘（事实 13） |
+
+**被判掉的中间方案（留教训）**：
+
+- **写成一等 `assistant/message` 合成 turn**：head 的 loop 用自己的内部计数编号（构造时快照一次
+  投影），插件插的 turn 1 被 head 自己的 turn 1 按 `${turn}:${step}` 节点键**覆盖**，卡片整块消失。
+- **走 next-turn**（官方唤醒卡）：一轮只认领一条 ⇒ N 条 = N 次请求。
+- **走 next-step 靠官方 `idleSteer`**：`claimedHuman` 与 `nextTurn.claimSeq < turnStart` 两条都不满足
+  （用户指令必然同批），卡片渲染成**不可见**上下文。
+- **直接 append 到会话开头**：撞 protected first row，把整条会话写成 corrupt。
+
+### 消息形状（会话格式 v4 的硬要求）### 消息形状（会话格式 v4 的硬要求）### 消息形状（会话格式 v4 的硬要求）
 
 插件往日志里写的每一条消息都必须过 v4 的采用校验，下面几条是踩过／核过的：
 

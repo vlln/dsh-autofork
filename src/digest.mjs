@@ -283,10 +283,15 @@ export function activeTargets(events) {
 }
 
 /**
- * 渲染 fork 通知：告诉新分叉会话它是什么、兄弟在做什么、如何避让。
+ * 渲染 fork 通知：**兄弟会话（分叉源）发给新分叉会话的消息正文**。
  *
- * 结构（顺序有实测依据）：**先点名兄弟正在动的文件**，再给避让协议，最后才是
- * digest 原文。把关键信息埋在事件流水里时，通知等于没生效。
+ * ⚠️ 措辞契约（与本插件的投递方式绑死）：这条文本以官方的 `agent-message` + `form:'relay'`
+ * 形状投给 head，客户端把它渲染成 **turn-trigger 卡片**（标题「收到任务消息」、agent 图标、
+ * 可展开正文），卡片头已经写明「来自会话 <sibling>」。所以正文里**说话的人是兄弟会话**：
+ * 「你」= 新分叉会话，「我」= 兄弟。写成新分叉会话自称（"我是分叉会话…"）会与卡片头自相矛盾。
+ *
+ * 结构（顺序有实测依据）：**先点名兄弟正在动的文件**，再给避让约定。把关键信息埋在
+ * 事件流水里时，通知等于没生效。
  *
  * 注意定位（这是实验结论，不是猜测）：真正的**安全网**是 harness 的
  * `fs-observation-policy` 版本守卫（撞上改动会拿到 FS_STALE_VERSION 并被要求
@@ -295,49 +300,40 @@ export function activeTargets(events) {
  * 避让提示——所以协议里明确写出这条优先级，而不是假装避让总能生效。
  *
  * @param {object} input 渲染输入。
- * @param {typeof import('./params.mjs').DEFAULT_PARAMS} input.params 参数。
  * @param {string} input.branchId 本分叉会话 id。
  * @param {string} input.siblingId 兄弟（父）分叉会话 id。
  * @param {string | undefined} input.cwd 共享工作目录。
  * @param {readonly string[]} [input.targets] 兄弟正在动的文件（`activeTargets` 的结果）。
- * @returns {string} 注入文本。
+ * @returns {string} 回复正文。
  */
-export function renderForkNotice({ params, branchId, siblingId, cwd, targets = [] }) {
+export function renderForkNotice({ branchId, siblingId, cwd, targets = [] }) {
   const lines = ['[自动分叉通知]']
 
   if (targets.length > 0) {
     lines.push(
       '',
-      `**兄弟分叉此刻正在动：${targets.map(path => `\`${path}\``).join('、')}**`,
-      '如果这些也在你的任务范围内，优先改**别的**目标——两边同时改同一处会让工作互相覆盖。',
-      '但如果它恰好是你任务里唯一或必须的目标，就**照常改**：任务完整性优先于避让。',
-      '那种情况下务必走下面的写入手法（先重读、用 edit），并预期可能撞到版本守卫。',
+      `**我此刻正在动：${targets.map(path => `\`${path}\``).join('、')}**`,
+      '如果这些也在你的任务范围内，你优先改**别的**目标——两边同时改同一处会让工作互相覆盖。',
+      '但如果它恰好是你任务里唯一或必须的目标，你**照常改**：任务完整性优先于避让。',
+      '那种情况下你先重读目标、用 edit，并预期可能撞到版本守卫。',
     )
   }
 
   lines.push(
     '',
-    `你是分叉会话 ${branchId}，从 ${siblingId} 分叉而来。`,
-    `**你现在就是用户所在的容器**：用户键入下一条消息时已经切到你这里，`,
-    `原来的会话 ${siblingId} 留在后台继续跑它没做完的那一轮（不会被中止）。`,
-    `所以接下来面对用户的是你，而不是它。`,
-    `兄弟分叉会话 ${siblingId} 仍在后台继续运行，你们共享同一工作目录${cwd === undefined ? '' : `（${cwd}）`}，文件系统没有隔离。`,
+    `你（分叉会话 ${branchId}）已经从我会话 ${siblingId} 分叉出来了，**接下来面对用户的是你**——`,
+    '用户的下一条消息会到你那里，而不是我这里。',
+    `我留在后台继续跑我没做完的那一轮（不会被中止），跑完我把结果发给你。`,
+    `我们共享同一工作目录${cwd === undefined ? '' : `（${cwd}）`}，文件系统没有隔离。`,
     '',
-    '避让协议（这是效率约定，不是安全保证）：',
-    '1. 写入前先重读目标文件；若它在你上次读取后变了，把你的改动重基到当前内容上，而不是写回你先前算出的值。',
+    '避让约定（效率约定，不是安全保证）：',
+    '1. 写入前先重读目标文件；若它在你上次读取后变了，把改动重基到当前内容上，而不是写回你先前算出的值。',
     '2. 优先用 edit 而不是整文件 write：edit 的冲突是局部且可恢复的，write 撞守卫后要重做整个合并。',
     '3. 撞到 "file changed since it was read"（FS_STALE_VERSION）不是错误，是信号：重读、重基、重试。',
-    '4. 下面列出了兄弟正在改的东西；不要同时改同一处。',
-    '5. 运行外部进程（bash）没有任何守卫保护——git commit、rm、mv、重定向都要你自己判断是否会和兄弟冲突。',
-    '',
-    `参数：${describeBudget(params)}`,
+    '4. 我正在改的东西上面列了；你不要同时改同一处。',
+    '5. 运行外部进程（bash）没有任何守卫保护——git commit、rm、mv、重定向都要你自己判断会不会和我冲突。',
   )
   return lines.join('\n')
-}
-
-/** 在 digest 文本里标注渲染预算，使阅读者知道信息被压到了什么程度。 */
-function describeBudget(params) {
-  return `digest≤${params.digestMaxChars} 字符 / 助手≤${params.digestAssistantChars} / 参数≤${params.digestToolArgsChars} / 结果≤${params.digestToolResultChars}`
 }
 
 /**
@@ -360,7 +356,7 @@ export function renderInFlightDigest({ events, params, siblingId }) {
   const { text, omitted } = assembleWithinBudget({ pinned, flow }, params.digestMaxChars)
   const header = [
     '[兄弟分叉在飞进度]',
-    `以下内容来自 ${siblingId} 尚未结束的 turn —— 它的 seed 只能切在 turn 边界，所以这段工作不在你的上下文里。`,
+    `以下是我（${siblingId}）尚未结束的那一轮——它的 seed 只能切在 turn 边界上，所以这段工作不在你的上下文里。`,
     '这是确定性渲染的原始事件流水，不是摘要，不要当成结论。',
   ].join('\n')
   const notes = []
@@ -487,7 +483,7 @@ export function instanceReplySummary({ instanceId, reply }) {
  */
 export function renderWorkerReply({ workerId, reply, stepCount, maxChars }) {
   const body = truncate(oneline(reply ?? ''), maxChars)
-  const header = `[后台会话回复] 来自 ${driverLabel(workerId)}（会话 ${workerId}；你接管的会话，与你在同一工作目录上并行工作）`
+  const header = `我（${driverLabel(workerId)}，会话 ${workerId}）这一轮跑完了，最后一条回复如下`
   if (body === '') {
     return `${header}\n它这一轮没有产出文本回复（走了 ${String(stepCount)} 步）。`
   }

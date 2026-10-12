@@ -35,7 +35,8 @@ import { appendFileSync } from 'node:fs'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { resolveParams, describeParams } from './src/params.mjs'
+import z from '@deepseek-ai/schemastery'
+import { resolveParams, describeParams, forkModeOf } from './src/params.mjs'
 import {
   activeTargets, boundSummary, driverLabel, instanceReplySummary, messageText, renderBranchHint,
   renderForkNotice, renderInFlightDigest, renderInstanceReply, renderWorkerReply,
@@ -63,11 +64,48 @@ export const name = 'dsh-autofork'
 export const inject = ['agents', 'sessionProjections']
 
 /**
+ * 条目 Config schema —— 它同时是**设置在 Plugins 页的可编辑面**。
+ *
+ * 契约（0.2.0-rc.2 实测）：
+ *  · 设置命名空间 = **Loader 条目 id**（本包 `cordis.patch.yml` 的 `insert.id` = `dsh-autofork`），
+ *    不是包名；客户端的 `configForms.get('dsh-autofork')` 用的就是它；
+ *  · 只有标了 `.volatile()` 的叶子会进 `settings.describe()`——一个 volatile 叶子都没有时
+ *    整个条目**不出现在**设置面，客户端 `whileServed` 也永不点火；
+ *  · `.volatile()` 叶子在 `apply` 拿到的 config 里是 `{ get() }` 引用：宿主改配置时**原地换值**、
+ *    不重挂载（`cordis-plugin-loader` 的 `_commitVolatile`），所以判定必须现取
+ *    （见 `src/params.mjs` 的 `forkModeOf`）；
+ *  · schema 非 strict：`forkMode` 之外的键（其余参数、未来新增参数）**原样保留**，
+ *    不会被校验剥掉，`resolveParams()` 照旧读得到。
+ */
+export const Config = z.object({
+  forkMode: z.union([z.const('auto'), z.const('manual')]).default('auto').volatile(),
+})
+
+/**
  * health 探针路径。存在的理由：DSH 的 `logger.info` 不写 stdout，因此"插件是否挂载
  * 成功""客户端在做什么"在进程外不可观测。这个路由把两者都变成可 curl 的事实，
  * 同时充当客户端的分叉关系数据源。
  */
 const HEALTH_PATH = '/api/dsh-autofork/health'
+
+/**
+ * 手动分叉的**动作路由**：客户端在队列那条指令上点「分叉」时 POST 到这里。
+ *
+ * 为什么需要一个 HTTP 动作而不用官方 RPC：分叉不是 session-controller 的能力
+ * （`session/fork` 是按 seq 分叉一条会话，不是"把 inbox 里这条排队指令摘出去分叉"），
+ * 而第三方 bundle 无法注册官方 remote 命名空间。本插件已有 health 路由先例，同一条路。
+ *
+ * ⚠️ 契约（安全）：**必须带自定义请求头** `x-dsh-autofork: 1`。自定义头让跨站请求
+ * 需要 CORS 预检，而本路由不回应预检 ⇒ 任何网页都无法对本地 127.0.0.1 发起本动作
+ * （无头 JSON 的"简单请求"本可以绕过同源策略）。头名字面量是分发契约的一部分，改它要同步客户端。
+ */
+const FORK_PATH = '/api/dsh-autofork/fork'
+
+/** 动作路由要求的自定义请求头。 */
+const FORK_HEADER = 'x-dsh-autofork'
+
+/** 请求体上限（只收两个短字符串，超限直接拒，不给内存放大留口子）。 */
+const FORK_BODY_MAX_BYTES = 4096
 
 
 /**
@@ -122,6 +160,12 @@ const PLUGIN_SOURCE = { kind: 'plugin:dsh-autofork' }
 export function apply(ctx, config) {
   const params = resolveParams(config)
   if (!params.enabled) return
+
+  /**
+   * 当前生效的分叉方式（每次现取，不缓存——见 `src/params.mjs` 的 `forkModeOf`）。
+   * @returns {'auto' | 'manual'} `'auto'` 忙时分叉；`'manual'` 入队等用户点「分叉」。
+   */
+  const forkMode = () => forkModeOf(config, params)
 
   /**
    * 装一个面向模型的消息，用于 inject()/followup()/append()。
@@ -765,28 +809,54 @@ export function apply(ctx, config) {
       }
     }
 
-    const age = currentStepAgeMs(session, projection)
+    // **手动模式**：指令照常入队（不动 inbox、不建会话），把"何时分叉"交给用户——
+    // 队列那条指令右侧的「分叉」按钮（客户端用 `conversation.input.dock` 注入）回调
+    // `POST FORK_PATH`，那时才走 `forkNow()`。放在**接管改投之后**：已交接的会话里发言
+    // 本来就该落到 head 上，那不是"要不要分叉"的决策。
+    if (forkMode() === 'manual') {
+      debug('manual.queued', { agent: agent.id, messageId: message.id })
+      return
+    }
+
+    await forkNow(agent, message, projection)
+  }
+
+  /**
+   * 真正建分叉：门槛判定 → CAS 抢下这条用户消息 → `spawnHead`。
+   *
+   * 两条触发路共用它——自动模式（`agent/inbox/inserted` 里立即可达）与手动模式
+   * （客户端点「分叉」后的动作路由）。**成功与失败都不吞消息**：抢不到就原样留在队列里，
+   * 建分叉失败就 `append('next-step')` 放回原投递路径。
+   * @param {any} agent 正在跑、持有这条排队消息的 agent。
+   * @param {any} message 要作为新会话开场白的用户消息。
+   * @param {any} projection 该 session 的 TurnBoundaryProjection。
+   * @returns {Promise<{ ok: boolean, reason?: string, headId?: string }>} 结果；`headId` 在成功时给出。
+   */
+  async function forkNow(agent, message, projection) {
+    const age = currentStepAgeMs(agent.session, projection)
     if (params.minStepAgeMs > 0 && age !== undefined && age < params.minStepAgeMs) {
       debug('skip.step-too-young', { agent: agent.id, age, min: params.minStepAgeMs })
-      return
+      return { ok: false, reason: 'step-too-young' }
     }
     if (activeFamilyCount(agent.id) >= params.maxActiveBranches) {
       debug('skip.family-cap', { agent: agent.id, cap: params.maxActiveBranches })
-      return
+      return { ok: false, reason: 'family-cap' }
     }
 
-    const cut = seedCut(session)
+    const cut = seedCut(agent.session)
     const won = agent.inbox.remove(message.id) === true
     debug('cas', { agent: agent.id, messageId: message.id, won, seedLength: cut.seed.length, stepAge: age })
-    if (!won) return
+    if (!won) return { ok: false, reason: 'cas-lost' }
 
     try {
-      await spawnHead(agent, message, projection, cut)
-      debug('fork.ok', { agent: agent.id })
+      const headId = await spawnHead(agent, message, projection, cut)
+      debug('fork.ok', { agent: agent.id, head: headId })
+      return { ok: true, headId }
     } catch (error) {
       // 分叉失败必须把消息放回原投递路径——绝不静默吞掉用户指令。
       agent.inbox.append('next-step', message)
       debug('fork.failed', { agent: agent.id, error: String(error), stack: error?.stack })
+      return { ok: false, reason: 'spawn-failed' }
     }
   }
 
@@ -1040,6 +1110,102 @@ export function apply(ctx, config) {
     }
   }
 
+  /* ------------- 注入内容的呈现：官方 agent 消息 → turn-trigger 卡片 ------------- */
+
+  /**
+   * 造一条**来自另一个会话的消息**（官方 `agent-message` 形状）。
+   *
+   * ⚠️ 这是本功能的关键，结论来自读客户端源码 + 真 GUI 验证：
+   *
+   * 1. 客户端把「**非 `user` 来源** 且 **被 `next-turn` 认领**（即它唤醒了这一轮）」的
+   *    `user/message` 渲染成 **turn-trigger 卡片**（`ui-chat` 的 input-message 定义：
+   *    `state.kind === 'context' && state.waking === true` ⇒ `kind:'turn-trigger'`）。
+   *    那张卡片带边框、agent 图标、标题、时间和可展开正文——正是 DSH 里 goal / subagent /
+   *    team 互相传消息的观感。
+   * 2. `kind:'agent-message'` 是官方给"相邻 agent 发来消息"的 kind（`dsh-subagent` 的
+   *    `agentMessageSource()` 就是这个），卡片标题取「收到任务消息」。
+   * 3. `form:'relay'` + `senderSessionId` 决定展开后的正文（"来自会话 X" + 内容）；
+   *    **缺了 `senderSessionId` 会退化成 opaque 的灰色上下文行**（客户端 `relaySender()`
+   *    返回 null ⇒ 走 `OpaqueBody`），也就是用户否掉的那种样子。
+   * 4. 必须**走 inbox**（`agent.inject()` / `agent.followup()`）而不是直接 append 到日志：
+   *    `waking` 的判据是"这条消息在 `next-turn` 的本次认领里"，直接 append 永远不会 waking。
+   *
+   * 内容前缀（`Agent <id> sent a message: `）是官方同款：relay 消息在模型侧是 **user 角色**，
+   * 不带来源标记会被误当成用户本人说的话。
+   * @param {string} senderId 发送方会话 id（分叉源 / 后台那条）。
+   * @param {string} text 消息正文。
+   * @param {'notice' | 'digest' | 'reply'} marker 本插件自己的消息种类标记。
+   * @returns {any} 可直接 append / 交给 `send` 的消息。
+   */
+  function agentMessage(senderId, text, marker) {
+    return createUserMessage({
+      content: [{ type: 'text', text: `分叉会话 ${senderId} 发来消息：${text}` }],
+      /**
+       * `autofork` 是本插件自己的**种类标记**（会话格式只校验 `kind` 非空且不是 `plugin`，
+       * 其余字段原样保留）：客户端 half 用它认领这三条并画成卡片。
+       *
+       * 为什么需要它、而不是靠 `waking` 走官方卡片：官方判据是
+       * `nextTurn.currentClaimed.has(id) || idleSteer`，而 `ReactLoopInbox.claim` 的粒度是
+       * **next-turn 每轮只认领 1 条**、next-step 整批但要求批里没有人类消息——
+       * 于是"两张卡 + 用户那条指令 + 只跑一次模型请求"在官方路径下不可能：
+       * 卡片 = 本轮开场触发，一轮只能有一张，多一张就多一轮（= 多一次请求）。
+       */
+      source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId, autofork: marker },
+    })
+  }
+
+  /** 一张卡片 = 一次**直接落盘**的追加（不进 inbox、不开 turn、不额外请求模型）。 */
+  function appendCard(session, message) {
+    session.append('user/message', message, { surfaceOp: 'append' })
+  }
+
+  /**
+   * 这条会话此刻能不能插卡片。
+   *
+   * 唯一不能插的时机是**悬空工具调用**窗口：`assistant(tool_calls)` 与它的 `tool/result` 之间
+   * 插任何非 tool 消息都会让 provider 拒掉整条会话，而且**写坏是永久的**（事实 13）。
+   * @param {any} session 目标会话。
+   * @returns {boolean} 现在能否写。
+   */
+  function canAppendCard(session) {
+    return !hasDanglingToolCall(session)
+  }
+
+  /**
+   * 这条会话的日志里已经有它**自己的开场 `system/message`** 了吗。
+   *
+   * ⚠️ 会话格式的硬约束：一条会话的**第一条消息**必须是它自己的 system prompt（protected
+   * first row）。在它之前插任何 user/message 都会让整条日志变成 **corrupt**——而且
+   * **写入端不报错、宿主照跑**，只有重新打开这条会话时读取端才拒：
+   * `SessionFormatError: system/message requires a protected first row`
+   * （界面上是 `Failed to load history … is corrupt`）。真 GUI 实测踩到过一次。
+   * @param {any} session 目标会话。
+   * @returns {boolean} 已经有 system/message 就返回 true。
+   */
+  function hasSystemMessage(session) {
+    try {
+      return session.snapshotEvents().some(event => event?.type === 'system/message')
+    } catch (error) {
+      debug('card.snapshot-failed', { error: String(error) })
+      return false
+    }
+  }
+
+  /** 因悬空工具调用而排队待补的卡片（key = head id）；head 转 idle 时补落盘。 */
+  const deferredHeadCards = new Map()
+
+  /**
+   * 排一张待补的卡片。
+   * @param {string} headId 目标会话 id。
+   * @param {any} message 待补的消息。
+   * @returns {void}
+   */
+  function queueHeadCard(headId, message) {
+    const queue = deferredHeadCards.get(headId)
+    if (queue === undefined) deferredHeadCards.set(headId, [message])
+    else queue.push(message)
+  }
+
   /* ------------------------------ 建 head ------------------------------ */
 
   /**
@@ -1050,7 +1216,7 @@ export function apply(ctx, config) {
    * @param {any} message 从它 inbox 摘下的用户消息。
    * @param {any} projection worker 的 TurnBoundaryProjection。
    * @param {{seed: any[]}} cut 预先算好的 seed。
-   * @returns {Promise<void>} 完成后 head 已在运行。
+   * @returns {Promise<string>} 新 head 的 session id（完成后它已在运行）。
    */
   async function spawnHead(worker, message, projection, cut, options = {}) {
     const session = worker.session
@@ -1194,20 +1360,42 @@ export function apply(ctx, config) {
     }
 
     // head 的上下文：分叉通知（点名 worker 正在动的文件）+ 在飞 turn 的 digest。
-    head.inject(contextMessage(renderForkNotice({
-      params,
+    //
+    // **呈现走一等助手回复**（用户看到的是助手卡片，而不是一行折叠的"上下文注入"）：
+    // 客户端 `input-message` 独占 `user/message` 的渲染，插件改不了（事实 15），所以要让这两条
+    // 长成对话的样子，只能写进 head 日志当助手回复。head 刚建好、空闲，正是能写的时刻；
+    // 写不进去（信封半写、种子里留着悬空调用）才退回注入——**信息绝不丢**。
+    //
+    // 容器模式不这么做：那边的用户视图是**容器**，实例只是它的 driver（容器里的一等回复由
+    // `writeInstanceAnswer` 写），实例日志不是对话本身。
+    // 两张卡的**投递方式**是这一版的关键，三条约束同时成立才行：
+    //
+    //  ① 不能坐 next-turn：`ReactLoopInbox.claim` 每轮只认领 1 条 ⇒ 三条消息 = 三个 turn =
+    //     **三次模型请求**（用户实测报的 bug）。
+    //  ② 不能**直接 append**：会话格式要求第一条消息必须是会话自己的 system prompt
+    //     （protected first row）——插在它之前会让整条日志变成 corrupt，**写入端不报错**，
+    //     只有重新打开会话时才炸（真 GUI 实测：`Failed to load history … is corrupt`）。
+    //     而 head 是刚建的，system/message 要等它第一轮 step 1 才写。
+    //  ③ 卡片**可见性**不能再依赖客户端的 `waking` / `idleSteer`：走 next-step 时两者都不成立
+    //     （`idleSteer` 要求批里没有人类消息，而用户那条指令必然同批）。
+    //
+    // 所以：两张卡走 **next-step**（与用户那条指令同一个 step 边界被整批认领），落在 head 首轮
+    // 的 system/message **之后**；可见性由本插件自己的客户端节点视图保证（`source.autofork` 标记）。
+    // 净效果：**一次 turn、一次模型请求、三样都渲染成卡片/气泡**。
+    head.send(agentMessage(session.id, renderForkNotice({
       branchId: headId,
       siblingId: session.id,
       cwd: session.header.cwd,
       targets: activeTargets(inFlight),
-    }), `你已接手这个对话；${driverLabel(session.id)} 的后台工作仍在继续`))
+    }), 'notice'), 'next-step', false)
     if (inFlight.length > 0) {
-      head.inject(contextMessage(renderInFlightDigest({
+      head.send(agentMessage(session.id, renderInFlightDigest({
         events: inFlight,
         params,
         siblingId: session.id,
-      }), `在飞上下文摘要：${driverLabel(session.id)} 的 ${inFlight.length} 个事件`))
+      }), 'digest'), 'next-step', false)
     }
+    // 用户那条指令：进 next-turn 并唤醒 ⇒ 由它（且只由它）开场本轮 turn。
     head.followup(message)
 
     // 容器模式：在容器里插一行折叠通知，说明"现在由谁回答"。
@@ -1241,6 +1429,7 @@ export function apply(ctx, config) {
 
     debug('spawn.done', { head: headId, worker: session.id })
     ctx.logger?.info?.(`[dsh-autofork] ${session.id} 被 ${headId} 接管（在飞 turn 补偿 ${inFlight.length} 个事件）`)
+    return headId
   }
 
   /**
@@ -1497,7 +1686,26 @@ export function apply(ctx, config) {
   // 所以这一刻追加**一定安全**，是补落盘的最佳时机。
   ctx.on('agent/status', ({ agent, status }) => {
     if (status !== 'idle') return
-    // 先补写"容器开着 turn 时排队的 agent 答复"。
+    // 先补写"悬空工具调用窗口里排队的那张卡片"（顺序敏感：与下面的队列互不干涉）。
+    const queuedCards = deferredHeadCards.get(agent?.id)
+    if (queuedCards !== undefined) {
+      deferredHeadCards.delete(agent.id)
+      const remaining = []
+      for (const message of queuedCards) {
+        if (!canAppendCard(agent.session)) {
+          remaining.push(message)
+          continue
+        }
+        try {
+          appendCard(agent.session, message)
+          debug('report.flushed', { head: agent.id, messageId: message.id })
+        } catch (error) {
+          debug('report.flush-failed', { head: agent.id, error: String(error) })
+        }
+      }
+      if (remaining.length > 0) deferredHeadCards.set(agent.id, remaining)
+    }
+    // 补写"容器开着 turn 时排队的 agent 答复"。
     const queuedAnswers = deferredAnswers.get(agent?.id)
     if (queuedAnswers !== undefined) {
       deferredAnswers.delete(agent.id)
@@ -1709,6 +1917,10 @@ export function apply(ctx, config) {
   }
 
   async function reportWorkerReply(worker, record) {
+    if (params.reInjectOnTurnEnd !== true) {
+      debug('report.disabled', { worker: worker.id })
+      return
+    }
     const { reply, stepCount } = lastTurnReply(worker)
 
     const text = renderWorkerReply({
@@ -1723,15 +1935,32 @@ export function apply(ctx, config) {
       debug('report.no-head', { worker: worker.id, head: record.headId })
       return
     }
-    debug('report.inject', {
-      worker: worker.id, head: record.headId, headStatus: head.status,
-      chars: text.length, hadReply: reply !== '',
-    })
-    if (head.status === 'idle' && params.wakeForegroundOnTurnEnd) {
-      head.followup(contextMessage(text, `${driverLabel(worker.id)} 的回复`))
-    } else {
-      head.inject(contextMessage(text, `${driverLabel(worker.id)} 的回复`))
+
+    // 后台那条的产出同样是**直接落盘的一张卡片**：head 不会因此多跑一轮、也不会多一次请求，
+    // 卡片立刻出现（这正是用户要的"只出现那张卡片"），模型在它下一次 turn 里读到这条消息。
+    //
+    // 唯一的约束来自**悬空工具调用**：往一条正在跑工具调用的会话里插 assistant/tool 之外的消息，
+    // 会把 `assistant(tool_calls)` 与它的 `tool/result` 拆开（事实 13，写坏是永久的）。
+    // 命中这个窗口就排队，等 head 转 idle 补落盘（见下面第三条 `agent/status` 订阅）。
+    const message = agentMessage(worker.id, text, 'reply')
+    if (!canAppendCard(head.session)) {
+      // 悬空工具调用窗口里插消息会把 `assistant(tool_calls)` 与它的结果拆开（事实 13）。
+      queueHeadCard(record.headId, message)
+      debug('report.deferred', {
+        worker: worker.id, head: record.headId, headStatus: head.status, chars: text.length,
+      })
+      return
     }
+    if (hasSystemMessage(head.session)) {
+      // head 已经开过口 ⇒ 直接落盘，卡片立刻出现、它不会因此多跑一轮。
+      appendCard(head.session, message)
+      debug('report.appended', { worker: worker.id, head: record.headId, chars: text.length })
+      return
+    }
+    // head 连第一轮都还没跑（还没有自己的 system/message）：直接落盘会把整条日志写坏
+    // （protected first row），所以进 next-step，等它开第一轮时落在 system 之后。
+    head.send(message, 'next-step', false)
+    debug('report.queued', { worker: worker.id, head: record.headId, chars: text.length })
   }
 
   /* ------------------------------ 分叉调度工具 ------------------------------ */
@@ -1838,7 +2067,14 @@ export function apply(ctx, config) {
         json(200, {
           ok: true,
           plugin: name,
-          params,
+          // `params` 是 apply 时刻的快照，`forkMode` 可能已被用户在设置里改过（volatile 原地换值）
+          // ⇒ 用**当前值**覆盖，否则同一份响应里两个字段会自相矛盾。
+          params: { ...params, forkMode: forkMode() },
+          /**
+           * 当前生效的分叉方式。客户端据此决定队列行上要不要挂「分叉」按钮——
+           * **以服务端为准**（不是读设置文档），所以按钮只会出现在宿主真的会按它行事时。
+           */
+          mode: forkMode(),
           tools: exposedToolNames,
           /**
            * 家族链条（根 → 最新，含本会话自己）：客户端「分叉」页签的数据源。
@@ -1854,7 +2090,96 @@ export function apply(ctx, config) {
     if (healthRoute !== undefined) {
       webCtx.effect(() => healthRoute, 'dsh-autofork: health 路由')
     }
+
+    // 手动分叉的动作路由（契约见 FORK_PATH 的注释）。
+    const forkRoute = webCtx.webServer?.register?.({
+      kind: 'exact',
+      path: FORK_PATH,
+      handler: async (req, res) => {
+        const json = (status, body) => {
+          res.statusCode = status
+          res.setHeader('content-type', 'application/json')
+          res.end(JSON.stringify(body))
+        }
+        // 自定义头是安全边界（见 FORK_PATH 注释）：缺它就不是本插件的客户端在说话。
+        if (req?.headers?.[FORK_HEADER] === undefined) {
+          debug('fork.request-refused', { reason: 'missing-header' })
+          json(403, { ok: false, error: 'missing-header' })
+          return
+        }
+        if ((req?.method ?? 'GET') !== 'POST') {
+          json(405, { ok: false, error: 'only POST is supported' })
+          return
+        }
+
+        let body = ''
+        try {
+          for await (const chunk of req) {
+            body += chunk
+            if (body.length > FORK_BODY_MAX_BYTES) {
+              json(413, { ok: false, error: 'body-too-large' })
+              return
+            }
+          }
+        } catch (error) {
+          debug('fork.body-failed', { error: String(error) })
+          json(400, { ok: false, error: 'body-unreadable' })
+          return
+        }
+        let payload
+        try {
+          payload = JSON.parse(body === '' ? '{}' : body)
+        } catch {
+          json(400, { ok: false, error: 'invalid-json' })
+          return
+        }
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+        const messageId = typeof payload?.messageId === 'string' ? payload.messageId : ''
+        if (sessionId === '' || messageId === '') {
+          json(400, { ok: false, error: 'sessionId-and-messageId-required' })
+          return
+        }
+
+        const result = await forkQueued(sessionId, messageId)
+        debug('fork.request', { sessionId, messageId, ok: result.ok, reason: result.reason })
+        json(result.ok ? 200 : result.status, result.ok
+          ? { ok: true, sessionId: result.headId }
+          : { ok: false, error: result.reason })
+      },
+    })
+    if (forkRoute !== undefined) {
+      webCtx.effect(() => forkRoute, 'dsh-autofork: 手动分叉路由')
+    }
   }, 'dsh-autofork: health 探针')
+
+  /**
+   * 手动分叉：把**这一刻仍在队列里**的那条用户指令摘出去分叉。
+   *
+   * 只认当前事实，不认客户端说了什么：消息必须此刻还在那个 agent 的 inbox 里
+   * （`nextTurn` / `nextStep` 两个待处理表），否则一律拒绝——客户端可能拿着一条
+   * 已经被 loop 领走、或早已被分叉过的 id 来按第二次。
+   * @param {string} sessionId 用户点「分叉」的那条会话。
+   * @param {string} messageId 那条排队指令的消息 id。
+   * @returns {Promise<{ ok: boolean, headId?: string, reason?: string, status?: number }>} 结果与对应 HTTP 状态。
+   */
+  async function forkQueued(sessionId, messageId) {
+    if (forkMode() !== 'manual') return { ok: false, reason: 'not-manual-mode', status: 409 }
+    const agent = ctx.agents.get(sessionId)
+    if (agent === undefined) return { ok: false, reason: 'agent-not-running', status: 404 }
+    if (agent.status !== 'running') return { ok: false, reason: 'agent-not-busy', status: 409 }
+
+    const message = [...(agent.inbox?.nextTurn ?? []), ...(agent.inbox?.nextStep ?? [])]
+      .find(candidate => candidate?.id === messageId)
+    if (message === undefined) return { ok: false, reason: 'not-queued', status: 409 }
+
+    const projection = ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
+    if (projection === undefined || projection.openTurnStartSeq === null) {
+      return { ok: false, reason: 'no-open-turn', status: 409 }
+    }
+
+    const result = await forkNow(agent, message, projection)
+    return result.ok ? { ok: true, headId: result.headId } : { ok: false, reason: result.reason, status: 409 }
+  }
 
   /* ------------------------------ 清理 ------------------------------ */
 

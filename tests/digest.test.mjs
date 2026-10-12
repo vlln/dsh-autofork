@@ -132,8 +132,8 @@ test('三个渲染面在同一输入下逐字节可复现', () => {
   const b = renderInFlightDigest({ ...args, events: [...IN_FLIGHT] })
   assert.equal(a, b, 'in-flight digest 必须确定性')
 
-  const n1 = renderForkNotice({ params: DEFAULT_PARAMS, branchId: 'b-1', siblingId: 's-1', cwd: '/w' })
-  const n2 = renderForkNotice({ params: DEFAULT_PARAMS, branchId: 'b-1', siblingId: 's-1', cwd: '/w' })
+  const n1 = renderForkNotice({ branchId: 'b-1', siblingId: 's-1', cwd: '/w' })
+  const n2 = renderForkNotice({ branchId: 'b-1', siblingId: 's-1', cwd: '/w' })
   assert.equal(n1, n2, 'fork notice 必须确定性')
 
   const r1 = renderWorkerReply({ workerId: 'w-1', reply: '做完了 X', stepCount: 3, maxChars: 500 })
@@ -155,12 +155,17 @@ test('空事件与空参数面都不崩', () => {
   assert.equal(typeof renderBranchHint({ headId: 'h' }), 'string')
 })
 
-test('renderForkNotice 告诉新 head：你现在就是用户所在的容器', () => {
-  const text = renderForkNotice({
-    params: DEFAULT_PARAMS, branchId: 'session-b', siblingId: 'session-a', cwd: '/w', targets: [],
-  })
-  assert.match(text, /\*\*你现在就是用户所在的容器\*\*/)
-  assert.match(text, /原来的会话 session-a 留在后台继续跑它没做完的那一轮（不会被中止）/)
+test('renderForkNotice 的说话人是**兄弟会话**（它以 agent-message 投递，卡片头写着"来自会话"）', () => {
+  const text = renderForkNotice({ branchId: 'session-b', siblingId: 'session-a', cwd: '/w', targets: [] })
+  // 契约：这条文本以官方 `agent-message` + `form:'relay'` 投给 head，客户端渲染成 turn-trigger
+  // 卡片，卡片头已经写明「来自会话 session-a」。所以正文里说话的人是**兄弟会话**：
+  // 「你」= 新分叉会话（session-b），「我」= 兄弟（session-a）。
+  // 写成新分叉会话自称（"我是分叉会话 session-b…"）会与卡片头自相矛盾。
+  assert.match(text, /你（分叉会话 session-b）已经从我会话 session-a 分叉出来了/)
+  assert.match(text, /\*\*接下来面对用户的是你\*\*/)
+  assert.match(text, /我留在后台继续跑我没做完的那一轮（不会被中止）/)
+  assert.match(text, /跑完我把结果发给你/)
+  assert.ok(!/我是分叉会话/u.test(text), '不得让新分叉会话自称——说话人是兄弟会话')
 })
 
 test('renderBranchHint 明说"用户已经切走了"（旧 agent 不该以为用户还在看它）', () => {
@@ -248,21 +253,21 @@ test('activeTargets 对畸形输入不抛错', () => {
 
 test('通知把兄弟的目标顶到最前面（埋在事件流水里等于没生效）', () => {
   const notice = renderForkNotice({
-    params: DEFAULT_PARAMS, branchId: 'b', siblingId: 's', cwd: '/w',
+    branchId: 'b', siblingId: 's', cwd: '/w',
     targets: ['src/api.ts', 'src/store.ts'],
   })
   const head = notice.slice(0, 400)
-  assert.match(head, /兄弟分叉此刻正在动.*src\/api\.ts.*src\/store\.ts/s)
-  assert.ok(head.indexOf('src/api.ts') < notice.indexOf('避让协议'),
-    '目标必须出现在避让协议之前')
+  assert.match(head, /我此刻正在动.*src\/api\.ts.*src\/store\.ts/s)
+  assert.ok(head.indexOf('src/api.ts') < notice.indexOf('避让约定'),
+    '目标必须出现在避让约定之前')
   // 必须写明"任务完整性优先于避让"——这是 8 次运行里 agent 一致采纳的优先级
   assert.match(notice, /任务完整性优先于避让/)
 })
 
 test('没有可识别目标时不产出空的目标段落', () => {
-  const notice = renderForkNotice({ params: DEFAULT_PARAMS, branchId: 'b', siblingId: 's', cwd: '/w' })
+  const notice = renderForkNotice({ branchId: 'b', siblingId: 's', cwd: '/w' })
   assert.ok(!notice.includes('此刻正在动'), '无目标时不得留下空标题')
-  assert.match(notice, /避让协议/)
+  assert.match(notice, /避让约定/)
 })
 
 /* ---------------- 环境变量参数覆盖（验证/运维通道） ---------------- */
@@ -359,4 +364,21 @@ test('instanceReplySummary：无产出时说明是空的，且仍有界', () => 
 test('renderInstanceReply：以当前 driver 的口吻出现（不是"某条陌生会话"）', () => {
   const text = renderInstanceReply({ instanceId: 'session-6a40195b-eed3', reply: '好的', maxChars: 100 })
   assert.match(text, /^\[分叉会话 6a40195b\] 这是它对你刚才那条指令的回复。\n好的$/)
+})
+
+test('三兄弟消息的措辞：说话人是**兄弟会话**（「我」= 兄弟，「你」= 新分叉会话）', () => {
+  // 契约：这三条都以官方 `agent-message` + `form:'relay'` 投给 head ⇒ 客户端渲染成
+  // turn-trigger 卡片，卡片头写着「来自会话 <兄弟>」，正文是**兄弟说的话**。
+  // 所以正文里兄弟自称「我」，新分叉会话是「你」；反过来（新分叉会话自称"我"）会与卡片头矛盾。
+  const notice = renderForkNotice({ branchId: 'b', siblingId: 's', cwd: '/w', targets: ['src/a.ts'] })
+  const digest = renderInFlightDigest({ events: IN_FLIGHT, params: DEFAULT_PARAMS, siblingId: 's' })
+  const reply = renderWorkerReply({ workerId: 's', reply: '做完了', stepCount: 2, maxChars: 100 })
+  for (const [name, text] of [['notice', notice], ['digest', digest], ['reply', reply]]) {
+    assert.ok(!/我是分叉会话/u.test(text), `${name} 不得让新分叉会话自称`)
+    assert.ok(!/我接管的那条/u.test(text), `${name} 不得用"接管"视角描述兄弟`)
+  }
+  assert.match(notice, /\*\*接下来面对用户的是你\*\*/)
+  assert.match(digest, /以下是我（s）尚未结束的那一轮/)
+  assert.match(reply, /我（.*s.*）这一轮跑完了/)
+  assert.match(reply, /不在你的上下文里|最后一条回复如下/)
 })

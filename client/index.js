@@ -51,8 +51,91 @@ window.__ModuleLoader__.load({
 
     var React = require('react')
 
+    /**
+     * 可选的同伴模块。**必须容错**：`require` 抛出会让整个 bundle 的工厂失败，浏览器报
+     * "loaded without registering" —— 整条客户端插件（含「分叉」页签与焦点交付）一起消失。
+     * 所以拿不到就降级，绝不因为一个可选控件让主体功能不可用。
+     *
+     * `react-dom` 在 0.2.0 的种子表里（`createPortal` 用它把「分叉」按钮挂进队列行）；
+     * primitives 也在种子里，用它的图标与控件让观感与官方一致。
+     */
+    var reactDom = tryRequire('react-dom')
+    var primitives = tryRequire('@deepseek-ai/dsh-client-ui-primitives') || {}
+
+    /**
+     * 取一个可选模块，拿不到返回 undefined。
+     * @param {string} name 模块名。
+     * @returns {any} 模块命名空间，或 undefined。
+     */
+    function tryRequire(name) {
+      try {
+        return require(name)
+      } catch (error) {
+        return undefined
+      }
+    }
+
     /** 本插件 Node half 的 health 路由。 */
     var HEALTH_PATH = '/api/dsh-autofork/health'
+
+    /**
+     * 手动分叉的动作路由（Node half 注册）。**必须带 `FORK_HEADER`**：自定义头让跨站
+     * 请求需要 CORS 预检，而服务端不回应预检 ⇒ 任何网页都无法对本地端口发起本动作
+     * （无自定义头的"简单 JSON 请求"本来可以绕过同源策略）。
+     */
+    var FORK_PATH = '/api/dsh-autofork/fork'
+
+    /** 动作路由要求的自定义请求头（与 Node half 的 `FORK_HEADER` 必须一字不差）。 */
+    var FORK_HEADER = 'x-dsh-autofork'
+
+    /** 设置命名空间 = Node half 的**条目 id**（`cordis.patch.yml` 的 `insert.id`），不是包名。 */
+    var SETTINGS_NS = 'dsh-autofork'
+
+    /** `plugins.bundle.config` 是 **keyed 槽**：key = bundle **包名**（与命名空间不同）。 */
+    var BUNDLE_PKG = '@vlln/dsh-autofork'
+
+    /** 队列行上「分叉」按钮的 DOM 属性（样式表也按它选）。 */
+    var FORK_ATTR = 'data-dsh-autofork-fork'
+
+    /**
+     * 本插件卡片（分叉通知 / 在飞摘要 / 后台回传）的**节点 kind**。
+     *
+     * 为什么不直接用官方的 turn-trigger 卡片：官方判据是
+     * `nextTurn.currentClaimed.has(id) || idleSteer`，而 `ReactLoopInbox.claim` 的粒度是
+     * **next-turn 每轮只认领 1 条**。于是"两条卡 + 用户那条指令 + 只跑一次模型请求"在官方路径下
+     * 不可能成立：卡片 = 本轮开场触发，一轮只能有一张，多一张就多一轮（= 多一次请求，用户实测报过）。
+     * 所以宿主把三条都**直接落盘**，卡片由本模块注册的节点视图渲染（形状照抄官方 trigger 卡片）。
+     */
+    var CARD_KIND = 'autofork-message'
+
+    /** 卡片根节点的 DOM 属性（样式按它选）。 */
+    var CARD_ATTR = 'data-dsh-autofork-card'
+
+    /** 标记 → 卡片标题（`source.autofork`，宿主 half 与这里必须一字不差）。 */
+    var CARD_TITLES = {
+      notice: '分叉通知',
+      digest: '在飞进度',
+      reply: '后台会话回复',
+    }
+
+    /** 回退条容器的 DOM 属性。 */
+    var FORKBAR_ATTR = 'data-dsh-autofork-forkbar'
+
+    /**
+     * 把一句回报发回 Node half 的决策日志。
+     *
+     * 客户端 half 跑在浏览器里，没有这条通道时它的任何失败都是纯黑盒——这是本插件从第一版
+     * 起就有的诊断面。定义在模块级（而不是 `apply` 内）是为了让子组件也能用。
+     * @param {string} note 回报内容。
+     * @returns {void}
+     */
+    function postNote(note) {
+      try {
+        fetch(HEALTH_PATH + '?client=1&note=' + encodeURIComponent(note), {
+          headers: { accept: 'application/json' },
+        }).catch(function () { /* 回报失败本身不必再报 */ })
+      } catch (error) { /* fetch 不可用时静默：诊断面不得反过来弄坏主体 */ }
+    }
 
     /**
      * 轮询间隔。
@@ -66,7 +149,7 @@ window.__ModuleLoader__.load({
     /* ------------------------------ 模块级 store ------------------------------ */
 
     /** UI 快照；轮询写入，React 组件订阅。 */
-    var snapshot = { current: undefined, nodes: [], driver: null }
+    var snapshot = { current: undefined, nodes: [], driver: null, mode: 'auto' }
 
     /** 订阅者集合（组件用）。 */
     var listeners = new Set()
@@ -362,6 +445,695 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /* ------------------------------ 手动分叉：队列那一行 ------------------------------ */
+
+    /**
+     * 一条消息内容的一行预览（队列行上认人的那一眼）。
+     * @param {any} content 消息 content（ContentBlock 数组）。
+     * @returns {string} 折叠空白后的有界文本，没有文本部分时为空串。
+     */
+    function previewOf(content) {
+      if (!Array.isArray(content)) return ''
+      for (var index = 0; index < content.length; index += 1) {
+        var part = content[index]
+        if (part !== null && part !== undefined && part.type === 'text' && typeof part.text === 'string') {
+          var text = part.text.replace(/\s+/gu, ' ').trim()
+          if (text === '') continue
+          return text.length > 60 ? text.slice(0, 59) + '…' : text
+        }
+      }
+      return ''
+    }
+
+    /**
+     * 队列里**可被分叉**的那些条目（手动模式下每一条都要有「分叉」入口）。
+     *
+     * 过滤规则**逐条复刻** `ui-conversation` 的 `QueueDock`（否则按钮会挂错行）：
+     * 取 `inbox['next-turn']`，剔除已经在聊天转写里出现的本地回声（`placement === 'transcript'`），
+     * 而**只在等宿主接纳**的本地回声（`placement === 'queued'`）没有宿主消息 id，无法作为
+     * 分叉对象，故不进本表——它的「分叉」按钮要等宿主那一行回来才出现（通常几十毫秒）。
+     * @param {any} inbox `useProjection('inbox')` 的值。
+     * @param {any} pendingSubmissions `useSession(s => s.pendingSubmissions)` 的值。
+     * @returns {Array<{id: string, preview: string}>} 按队列顺序的可分叉条目。
+     */
+    function queuedForkables(inbox, pendingSubmissions) {
+      var rows = inbox !== null && inbox !== undefined && Array.isArray(inbox['next-turn'])
+        ? inbox['next-turn']
+        : []
+      var submissions = Array.isArray(pendingSubmissions) ? pendingSubmissions : []
+
+      var inTranscript = {}
+      var transcriptCount = 0
+      for (var index = 0; index < submissions.length; index += 1) {
+        if (submissions[index]?.placement !== 'transcript') continue
+        inTranscript[submissions[index].requestId] = true
+        transcriptCount += 1
+      }
+
+      var queue = rows
+      if (transcriptCount > 0) {
+        queue = rows.filter(function (row) {
+          var source = row?.source
+          if (source === undefined || source === null || source.kind !== 'user') return true
+          if (!Object.prototype.hasOwnProperty.call(source, 'rpcId')) return true
+          return inTranscript[source.rpcId] !== true
+        })
+      }
+
+      return queue
+        .filter(function (row) { return typeof row?.id === 'string' && row.id !== '' })
+        .map(function (row) { return { id: row.id, preview: previewOf(row.content) } })
+    }
+
+    /**
+     * 队列 dock 每一行的 DOM 挂载点。
+     *
+     * `QueueDock` 的根节点带 `data-queue-dock` 属性、每行是一个 `<li>`——这是**非公开 DOM
+     * 契约**（官方没有给"往队列行里加按钮"的槽）。因此这里**只读不写别人的结构**：取不到
+     * 就返回空数组，调用方退回自己画一条回退条——绝不猜、不乱插。
+     * @param {any} root 查询根（浏览器里是 `document`）。
+     * @param {number} count 需要几行的挂载点。
+     * @returns {Array<any>} 长度为 count 的数组，缺失位置是 null。
+     */
+    function queueRowTargets(root, count) {
+      var nodes = root !== null && root !== undefined && typeof root.querySelectorAll === 'function'
+        ? root.querySelectorAll('[data-queue-dock] li')
+        : []
+      var targets = []
+      for (var index = 0; index < count; index += 1) {
+        targets.push(nodes[index] === undefined ? null : nodes[index])
+      }
+      return targets
+    }
+
+    /**
+     * 这个节点在队列 dock 的子树里吗（含自身）。
+     * @param {any} node DOM 节点。
+     * @returns {boolean} 是否属于队列 dock。
+     */
+    function insideQueueDock(node) {
+      var current = node
+      for (var depth = 0; depth < 32 && current !== null && current !== undefined; depth += 1) {
+        if (current.nodeType === 1 && typeof current.hasAttribute === 'function'
+          && current.hasAttribute('data-queue-dock')) {
+          return true
+        }
+        current = current.parentNode
+      }
+      return false
+    }
+
+    /**
+     * 这批 DOM 变动碰到队列 dock 了吗。
+     *
+     * 用途：`MutationObserver` 挂在 `document.body` 上（队列 dock 可能还没挂载），但**只在
+     * 队列那一块动了才重渲染**——否则流式输出每帧都会让本组件跟着重画一次。
+     * @param {any[]} mutations MutationRecord 数组。
+     * @returns {boolean} 是否需要重渲染。
+     */
+    function touchesQueueDock(mutations) {
+      for (var index = 0; index < mutations.length; index += 1) {
+        var mutation = mutations[index]
+        if (insideQueueDock(mutation?.target)) return true
+        var added = mutation?.addedNodes
+        for (var position = 0; added !== undefined && position < added.length; position += 1) {
+          if (insideQueueDock(added[position])) return true
+        }
+      }
+      return false
+    }
+
+    /**
+     * 发一次手动分叉请求。
+     * @param {string} sessionId 目标会话。
+     * @param {string} messageId 队列里那条消息的 id。
+     * @returns {Promise<{ok: boolean, sessionId?: string, error?: string}>} 服务端结论。
+     */
+    function forkRequest(sessionId, messageId) {
+      var headers = { 'content-type': 'application/json' }
+      headers[FORK_HEADER] = '1'
+      return fetch(FORK_PATH, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({ sessionId: sessionId, messageId: messageId }),
+      }).then(function (response) {
+        return response.json().catch(function () { return undefined }).then(function (body) {
+          if (body !== undefined && body !== null && typeof body === 'object') return body
+          return { ok: false, error: 'http-' + String(response.status) }
+        })
+      })
+    }
+
+    /**
+     * 给一个控件挂上官方悬停提示（拿不到 primitives 时退回原生 `title`）。
+     * @param {string} label 提示文案。
+     * @param {object} element 控件元素。
+     * @returns {object} 可能被包了一层的元素。
+     */
+    function withTooltip(label, element) {
+      if (typeof primitives.Tooltip !== 'function') return element
+      return React.createElement(primitives.Tooltip, {
+        portal: true,
+        label: label,
+        side: 'bottom',
+        delayMs: 500,
+      }, element)
+    }
+
+    /**
+     * 队列行右侧那枚「分叉」按钮（点它才分叉这条排队中的指令）。
+     *
+     * **观感必须与旁边的官方按钮一模一样**（编辑 / 删除 / 转向）：官方那几个是
+     * **图标按钮**——28×28 圆形、14px 图标、无文字、悬停提示在 Tooltip 里
+     * （`QueueDock.module.css` 的 `.action`）。所以这里也只放图标：
+     * 文字版会比旁边宽一倍、圆角形状也不同，一眼就看得出是外挂的。
+     *
+     * 状态只体现在**颜色与提示文案**上，几何形状不变：
+     * idle 三级文字色 / busy 半透明（`:disabled` 的 .45）/ failed 错误色 + 提示说明可再点一次。
+     *
+     * 单击即发请求；服务端是唯一权威——它只认"这条消息此刻仍在那个 agent 的队列里"，
+     * 抢不到就回 409，本按钮转成失败态并把原因回报进决策日志（`client.note`）。
+     * 不自动重试：同一条消息点第二次是用户的决定，不是我们的。
+     * @param {object} props `{ sessionId, messageId, preview }`。
+     * @returns {object} React 元素。
+     */
+    function ForkButton(props) {
+      var pair = React.useState('idle')
+      var phase = pair[0]
+      var setPhase = pair[1]
+
+      var submit = function () {
+        if (phase === 'busy') return
+        setPhase('busy')
+        forkRequest(props.sessionId, props.messageId)
+          .then(function (result) {
+            if (result.ok === true) {
+              setPhase('idle')
+              postNote('fork.button.ok: ' + props.messageId + ' -> ' + String(result.sessionId))
+              return
+            }
+            setPhase('failed')
+            postNote('fork.button.refused: ' + props.messageId + ' ' + String(result.error))
+          })
+          .catch(function (error) {
+            setPhase('failed')
+            postNote('fork.button.failed: ' + props.messageId + ' ' + String(error))
+          })
+      }
+
+      // 提示文案：官方同级按钮是「编辑 / 删除 / 转向」这种一个词，所以常态也只给「分叉」；
+      // 这条指令本身是什么，交给 aria-label（读屏能听全，视觉上不占位）。
+      var tooltip = phase === 'busy' ? '分叉中…' : (phase === 'failed' ? '分叉失败，可再点一次' : '分叉')
+      var icon = typeof primitives.IconBranchOutlineRegular === 'function'
+        ? React.createElement(primitives.IconBranchOutlineRegular, { size: 14 })
+        // 拿不到官方图标时用分支符号顶上：字号与图标同量级，几何形状不受影响。
+        : React.createElement('span', { style: { fontSize: '14px', lineHeight: 1 } }, '⑂')
+
+      var attributes = {
+        type: 'button',
+        className: 'dsh-autofork-fork',
+        'aria-label': '分叉这条排队中的指令：' + props.preview,
+        disabled: phase === 'busy',
+        onClick: submit,
+      }
+      attributes[FORK_ATTR] = ''
+      if (phase === 'failed') attributes['data-tone'] = 'error'
+      // 有官方 Tooltip 时不要再挂原生 `title`（会与它叠成两个提示）；没有时 title 是唯一的说明面。
+      if (typeof primitives.Tooltip !== 'function') attributes.title = tooltip
+
+      return withTooltip(tooltip, React.createElement('button', attributes, [icon]))
+    }
+
+    /**
+     * 队列行内的「分叉」按钮注入点（`conversation.input.dock` 的 list 槽条目）。
+     *
+     * ## 为什么是 DOM 注入而不是槽
+     *
+     * 队列行右侧那几个按钮（编辑 / 删除 / 转向）写死在官方 `QueueDock` 里，`QueueAction`
+     * 也是 `edit | remove | steer` 的封闭联合——插件层**没有**"往一条队列行加动作"的槽，
+     * 也没法接管或包裹别人已注册的槽条目（注册绑在各自 fiber 上）。所以这里用官方留的
+     * `conversation.input.dock` 槽**只做一件事**：用 `createPortal` 把自己的按钮挂进那一行。
+     *
+     * ## 契约与失败模式（都是"不出现"，不是"做错事"）
+     *
+     *  · 只认 `[data-queue-dock] li` 这个非公开 DOM 契约；结构变了 → 挂载点取不到 →
+     *    本组件退回画一条右对齐的回退条（每条排队指令一个按钮），功能仍在；
+     *  · 队列面板**收起**（多于一条时行整体不在 DOM 里）→ 同上走回退条；
+     *  · 没有 `react-dom`（非 web 组合）→ 只走回退条；
+     *  · 模式不是手动（`mode !== 'manual'`）→ 整条不渲染。
+     * @param {object} props 槽运行时 props（session 作用域：`sessionId` / `useProjection` / `useSession`）。
+     * @returns {any} 门户数组、回退条，或 null。
+     */
+    function ForkDock(props) {
+      var pair = React.useState(getSnapshot())
+      var setSnapshot = pair[1]
+      React.useEffect(function () {
+        return subscribe(function () { setSnapshot(getSnapshot()) })
+      }, [])
+
+      var sessionId = props.sessionId
+      var inbox = typeof props.useProjection === 'function' ? props.useProjection('inbox') : undefined
+      var pending = typeof props.useSession === 'function'
+        ? props.useSession(function (state) { return state.pendingSubmissions })
+        : undefined
+      var forkables = queuedForkables(inbox, pending)
+
+      var snap = pair[0]
+      // 以**服务端**为准：只有宿主此刻真的按手动模式行事时，按钮才出现。
+      var manual = snap.mode === 'manual' && snap.current === sessionId
+
+      var bumpPair = React.useState(0)
+      var bump = bumpPair[1]
+      var signature = forkables.map(function (row) { return row.id }).join('\u0000')
+
+      // 队列面板从"收起"变"展开"时行才进 DOM，而队列长度没变——所以还得听 DOM 变化。
+      // 只在**队列 dock 子树**变动时重渲染：整页 DOM 变化（流式输出）不该让本组件跟着重画。
+      React.useEffect(function () {
+        if (!manual || forkables.length === 0 || reactDom === undefined) return undefined
+        if (typeof MutationObserver !== 'function' || typeof document === 'undefined') return undefined
+        var observer = new MutationObserver(function (mutations) {
+          if (!touchesQueueDock(mutations)) return
+          bump(function (value) { return value + 1 })
+        })
+        observer.observe(document.body, { childList: true, subtree: true })
+        return function () { observer.disconnect() }
+      }, [signature, manual, sessionId])
+
+      if (!manual || forkables.length === 0) return null
+
+      // 挂载点**在渲染期直接解析**：DOM 已提交，读到的就是这一刻的队列行。读不到（结构变了 /
+      // 面板收起 / 没有 react-dom）就退回下面那条回退条——"不出现"是唯一的失败模式。
+      var targets = reactDom === undefined
+        ? []
+        : queueRowTargets(typeof document === 'undefined' ? undefined : document, forkables.length)
+
+      var portals = []
+      if (reactDom !== undefined && typeof reactDom.createPortal === 'function') {
+        for (var index = 0; index < forkables.length; index += 1) {
+          var node = targets[index]
+          if (node === undefined || node === null) continue
+          portals.push(reactDom.createPortal(
+            React.createElement(ForkButton, {
+              sessionId: sessionId,
+              messageId: forkables[index].id,
+              preview: forkables[index].preview,
+            }),
+            node,
+            forkables[index].id,
+          ))
+        }
+      }
+      if (portals.length > 0) return portals
+
+      // 回退条：行不在 DOM 里（面板收起）或拿不到 react-dom 时，每条排队指令仍各有一个入口。
+      // 间距与官方 `.actions` 的 10px 对齐（按钮本身样式同 `.action`，见 installForkStyles）。
+      var barProps = {
+        style: { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
+      }
+      barProps[FORKBAR_ATTR] = ''
+      return React.createElement('div', barProps,
+        forkables.map(function (row) {
+          return React.createElement(ForkButton, {
+            key: row.id,
+            sessionId: sessionId,
+            messageId: row.id,
+            preview: row.preview,
+          })
+        }))
+    }
+
+    /* ------------------------------ 手动分叉：开关在哪 ------------------------------ */
+
+    /**
+     * 把「分叉方式」写进设置文档，并按宿主回读值确认真的落库了。
+     *
+     * 不自己传 `expectedRevision`：官方 `ConfigFormController` 自己按 `pendingRevision`
+     * 串行排队并给后继写定栅栏；自己传快照 revision 会绕过那道栅栏，同一 RTT 内的连续改动
+     * 会被宿主按 CAS 拒（第一次其实已落库），结果是误报"未被接受"。
+     * @param {any} scope `configForms.get(SETTINGS_NS)` 的 ConfigFormController。
+     * @param {string} value 目标取值（`'auto'` / `'manual'`）。
+     * @returns {Promise<void>} 未被接受时抛错（卡片据此提示并回读宿主值）。
+     */
+    function writeForkMode(scope, value) {
+      return Promise.resolve(scope.mutate([{ op: 'set', path: ['forkMode'], value: value }]))
+        .then(function (accepted) {
+          var committed = scope.getSnapshot()?.value
+          var landed = committed === null || committed === undefined ? undefined : committed.forkMode
+          if (accepted !== true || landed !== value) {
+            throw new Error('dsh-autofork: 设置写入未被接受（forkMode=' + value + '）')
+          }
+        })
+    }
+
+    /** 两种方式的说明文案（卡片下方一行）。 */
+    var MODE_HINT = {
+      auto: '忙的时候你提交的指令会立刻在新会话里开始执行（本插件的原始行为）。',
+      manual: '忙的时候你提交的指令照常排队；在队列那条指令上点「分叉」才分叉。',
+    }
+
+    /**
+     * Plugins 页上本插件的设置卡片（`plugins.bundle.config` keyed 槽，key = bundle 包名）。
+     *
+     * 与官方通用设置页同一种保存语义：**改动即时写入**，没有保存按钮——官方设置页的开关与
+     * 选项都是"改即落库"，只有部分页面用页脚保存。
+     * @param {object} props 槽 props（`view` / `t`）加注入面（`useForkSettings` / `writeForkMode`）。
+     * @returns {any} 一行描述（`summary` 视图）、设置区，或 null（命名空间不可用）。
+     */
+    function ForkSettingsCard(props) {
+      var state = props.useForkSettings(function (value) { return value })
+      var pair = React.useState(false)
+      var failed = pair[0]
+      var setFailed = pair[1]
+
+      if (props.view === 'summary') return '自动分叉 / 手动分叉'
+      if (state === null || state === undefined || state.status === 'unavailable') return null
+
+      var current = state.value !== null && state.value !== undefined && state.value.forkMode === 'manual'
+        ? 'manual'
+        : 'auto'
+      var disabled = state.writable !== true
+
+      var choose = function (value) {
+        if (disabled || value === current) return
+        setFailed(false)
+        Promise.resolve(props.writeForkMode(value)).catch(function (error) {
+          setFailed(true)
+          postNote('settings.write-refused: ' + String(error))
+        })
+      }
+
+      var control = typeof primitives.SegmentedControl === 'function'
+        ? React.createElement(primitives.SegmentedControl, {
+          id: 'dsh-autofork-mode',
+          label: '分叉方式',
+          value: current,
+          disabled: disabled,
+          options: [
+            { value: 'auto', label: '自动分叉' },
+            { value: 'manual', label: '手动分叉' },
+          ],
+          onChange: choose,
+        })
+        : React.createElement('div', { style: { display: 'flex', gap: '8px' } },
+          ['auto', 'manual'].map(function (value) {
+            return React.createElement('button', {
+              key: value,
+              type: 'button',
+              className: 'dsh-autofork-fork',
+              'aria-pressed': current === value,
+              disabled: disabled,
+              onClick: function () { choose(value) },
+            }, value === 'auto' ? '自动分叉' : '手动分叉')
+          }))
+
+      return React.createElement('div', {
+        'data-dsh-autofork-settings': '',
+        style: { display: 'flex', flexDirection: 'column', gap: '4px', padding: '4px 0' },
+      },
+      React.createElement('span', {
+        style: { fontSize: '13px', fontWeight: '500', lineHeight: '20px', color: TOKEN.labelPrimary },
+      }, '分叉方式'),
+      control,
+      React.createElement('span', {
+        style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelTertiary },
+      }, MODE_HINT[current]),
+      failed ? React.createElement('span', {
+        role: 'status',
+        style: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary, #c62828)' },
+      }, '刚才的改动未被接受，已回读当前值。') : null,
+      )
+    }
+
+    /**
+     * 注册设置卡片。
+     *
+     * 走**嵌套** `ctx.inject(['configForms'])` 而不是顶层 `inject`：`ui-settings` 缺席的
+     * 组合里整条客户端插件仍要能用（顶层缺服务会让 apply 直接抛，插件的其他功能一起消失）。
+     *
+     * 注册**不**经 `configForms.whileServed()`（官方页面的写法）：本卡片只出现在**本插件自己的
+     * 包页**上，而 `plugins.bundle.config` 的 keyed 槽本身就是渲染条件——服务缺席时卡片自己
+     * 渲染成空，比"整个槽位时有时无"更少一种只在浏览器里才暴露的失败模式。
+     * @param {any} ctx 客户端插件上下文。
+     * @param {any} slots 槽服务。
+     * @returns {void}
+     */
+    function registerForkSettings(ctx, slots) {
+      // 整段**包在 try 里**：设置卡片是可选能力，而这条路径（嵌套 inject + configForms 的形状）
+      // 只在浏览器里才能真验。任何一步不如预期都必须是"卡片不出现"，绝不能把 apply 抛掉——
+      // 那会连带「分叉」页签与焦点交付一起消失（比少一个设置项严重得多）。
+      try {
+        if (typeof ctx.inject !== 'function') {
+          postNote('settings.no-inject: 客户端 ctx 没有 inject，设置卡片未注册')
+          return
+        }
+        ctx.inject(['configForms'], function (formCtx) {
+          var forms = formCtx.configForms
+          if (forms === undefined || forms === null || typeof forms.get !== 'function') {
+            postNote('settings.no-config-forms: configForms 服务形状不符，设置卡片未注册')
+            return
+          }
+          var scope = forms.get(SETTINGS_NS)
+          slots.inject('plugins.bundle.config', function () {
+            return slots.register({
+              name: 'plugins.bundle.config',
+              key: BUNDLE_PKG,
+              inject: function () {
+                return {
+                  hooks: {
+                    forkSettings: {
+                      getSnapshot: function () { return scope.getSnapshot() },
+                      subscribe: function (listener) { return scope.subscribe(listener) },
+                    },
+                  },
+                  writeForkMode: function (value) { return writeForkMode(scope, value) },
+                }
+              },
+            }, ForkSettingsCard)
+          })
+        })
+      } catch (error) {
+        postNote('settings.register-failed: ' + String(error))
+      }
+    }
+
+    /**
+     * 注入本插件的那几行样式（表里的 `:hover` 没法用内联样式表达）。
+     * @returns {Function} 卸载函数；本次没创建时是空操作。
+     */
+    /* ------------------------- 卡片（消息卡，照抄官方 trigger 观感） ------------------------- */
+
+    /**
+     * 消息卡的样式：**逐条照抄官方 `TurnTriggerNodeView.module.css`**（插件拿不到那个 CSS module
+     * 的哈希类名，只能复刻声明），只把类名前缀换成我们自己的属性选择器。这样这三张卡片与官方
+     * 「收到任务消息」卡片在边框、圆角、留白、字号、折叠行为上完全一致。
+     * @returns {() => void} 卸载函数。
+     */
+    function installCardStyles() {
+      if (typeof document === 'undefined' || document.head === null || document.head === undefined) {
+        return function () {}
+      }
+      var element = document.createElement('style')
+      element.id = 'dsh-autofork-card-styles'
+      element.textContent = [
+        '[data-dsh-autofork-card]{border:.5px solid var(--dsw-alias-border-l1);',
+        'border-radius:var(--dsw-radius-xl);',
+        'background:var(--dsw-alias-turn-trigger-bg,var(--dsw-alias-markdown-code-block));',
+        'min-width:0;transition:background-color .1s}',
+        '[data-dsh-autofork-card]:hover{background:var(--dsw-alias-turn-trigger-bg-hover,',
+        'var(--dsw-alias-interactive-bg-hover))}',
+        '[data-dsh-autofork-card] > button{width:100%;color:var(--dsw-alias-label-tertiary);font:inherit;',
+        'text-align:left;cursor:pointer;background:0 0;border:0;align-items:center;gap:10px;',
+        'padding:12px 16px;transition:color .1s;display:flex}',
+        '[data-dsh-autofork-card] > button:hover{color:var(--dsw-alias-label-secondary)}',
+        '[data-dsh-autofork-card] [data-part=icon]{color:inherit;flex:none;display:inline-flex}',
+        '[data-dsh-autofork-card] [data-part=title]{font-size:var(--dsh-content-font-size,14px);flex:none}',
+        '[data-dsh-autofork-card] [data-part=time]{color:inherit;font:var(--dsw-font-xxs-12);flex:none;',
+        'margin-left:auto}',
+        '[data-dsh-autofork-card] [data-part=chevron]{color:inherit;flex:none}',
+        '[data-dsh-autofork-card][data-open] [data-part=chevron]{transform:rotate(180deg)}',
+        '[data-dsh-autofork-card] [data-part=body]{padding:0 16px 12px 40px}',
+        '[data-dsh-autofork-card] [data-part=sender]{color:var(--dsw-alias-label-caption);',
+        'overflow-wrap:anywhere;margin:0 0 6px}',
+        '[data-dsh-autofork-card] [data-part=content]{white-space:pre-wrap;overflow-wrap:anywhere;',
+        'max-height:240px;font:var(--dsw-font-xxs-12);overflow:auto}',
+        '@media (prefers-reduced-motion:reduce){[data-dsh-autofork-card],[data-dsh-autofork-card] > button',
+        '{transition:none}}',
+      ].join('')
+      document.head.appendChild(element)
+      return function () {
+        if (element.parentNode !== null && element.parentNode !== undefined) element.parentNode.removeChild(element)
+      }
+    }
+
+    /**
+     * 消息卡视图：图标 + 标题 + 时间 + 可展开正文（结构照抄官方 `TurnTriggerNodeView`）。
+     * @param {any} props 槽位注入的 props（`node` 是本模块定义产出的节点）。
+     * @returns {any} React 元素。
+     */
+    function AutoforkCardView(props) {
+      var node = props?.node
+      var data = node?.data ?? {}
+      var [open, setOpen] = React.useState(false)
+      var Icon = primitives.IconPaperPlaneOutlineRegular ?? primitives.IconBranchOutlineRegular
+      var Chevron = primitives.IconChevronDownOutlineRegular
+      var title = CARD_TITLES[data.marker] ?? '消息'
+      var clock = ''
+      try {
+        clock = new Date(data.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+      } catch (error) {
+        clock = ''
+      }
+      var head = React.createElement('button', {
+        type: 'button',
+        'aria-expanded': open,
+        onClick: function () { setOpen(!open) },
+      },
+      Icon === undefined ? null : React.createElement('span', { 'data-part': 'icon', 'aria-hidden': true },
+        React.createElement(Icon, { size: 14 })),
+      React.createElement('span', { 'data-part': 'title' }, title),
+      clock === '' ? null : React.createElement('time', { 'data-part': 'time' }, clock),
+      Chevron === undefined ? null : React.createElement(Chevron, { 'data-part': 'chevron', size: 12 }))
+      var body = open === false ? null : React.createElement('div', { 'data-part': 'body' },
+        React.createElement('p', { 'data-part': 'sender' }, '来自会话 ' + (data.sender === '' ? '未知' : data.sender)),
+        React.createElement('div', { 'data-part': 'content' }, data.text))
+      return React.createElement('section', {
+        [CARD_ATTR]: data.marker,
+        'data-open': open ? '' : undefined,
+      }, head, body)
+    }
+
+    /**
+     * 注册"这三条消息长成卡片"的客户端节点定义 + 视图。
+     *
+     * 契约来自官方 `ui-goal`（它用同一套 API 画 `/goal` 指令卡片）：
+     *  · `ctx.uiConversation.events.register({kind, target:'chat', match, start, update, buildViewNode})`
+     *    定义一种**新的会话节点**；
+     *  · `slots.register({name:'conversation.chat.node', key:<kind>}, View)` 把该 kind 的渲染交给
+     *    我们的组件（ui-chat 的每个 flow item 里都有 `[data-slot="conversation.chat.node"]`）。
+     *
+     * 走**嵌套** `ctx.inject(['uiConversation'])`：这两个服务缺席（比如非 web 组合）时只丢卡片，
+     * 不能把整条客户端插件（页签 / 焦点交付 / 分叉按钮）一起拖下水。
+     * @param {any} ctx 客户端根上下文。
+     * @param {any} slots slots 服务。
+     * @returns {() => void} 卸载函数。
+     */
+    function registerAutoforkCards(ctx, slots) {
+      if (typeof ctx.inject !== 'function' || slots === undefined) return function () {}
+      var disposeStyles = installCardStyles()
+      var disposeSlot = function () {}
+      var disposeEvents = function () {}
+      try {
+        ctx.inject(['uiConversation'], function (conversationCtx) {
+          var definition = {
+            kind: CARD_KIND,
+            target: 'chat',
+            match: function (event) {
+              // 只认本插件自己写的三条（宿主在 source 上打了 `autofork` 标记）——
+              // 别人的 agent 消息照旧走官方渲染，我们不去抢。
+              if (event?.type !== 'user/message') return null
+              var marker = event.data?.source?.autofork
+              if (typeof marker !== 'string') return null
+              return { id: String(event.data.id), role: 'start' }
+            },
+            start: function (context, match) {
+              var event = match.event
+              return {
+                id: match.id,
+                seq: event.seq,
+                time: event.time,
+                marker: event.data.source.autofork,
+                sender: typeof event.data.source.senderSessionId === 'string' ? event.data.source.senderSessionId : '',
+                text: (event.data.content ?? [])
+                  .filter(function (part) { return part?.type === 'text' })
+                  .map(function (part) { return part.text })
+                  .join(''),
+              }
+            },
+            update: function (context) { return context.state },
+            buildViewNode: function (context) {
+              if (context.state === undefined) return null
+              return {
+                key: context.key,
+                kind: CARD_KIND,
+                id: context.id,
+                target: 'chat',
+                anchorSeq: context.state.seq,
+                // ⚠️ **必须显式 unresolved**：客户端把"落在 turn 内、且 kind 不在
+                // `TURN_PROCESS_INDEPENDENT_KINDS` 里"的节点当成 turn 的**过程成员**，
+                // 折进那个可折叠的 "Completed in …" 分组里（真 GUI 实测：卡片被折叠、文字都取不到）。
+                // 标成 unresolved 后它就是独立的一行，显示位置仍由 anchorSeq（= 事件 seq）决定，
+                // 所以顺序依旧是"通知 → 摘要 → 用户那条指令"。
+                location: { kind: 'unresolved' },
+                visibility: 'visible',
+                data: context.state,
+              }
+            },
+          }
+          disposeEvents = conversationCtx.uiConversation.events.register(definition) ?? function () {}
+          postNote('card.registered')
+        })
+        // ⚠️ **必须**包在 `slots.inject('conversation.chat.node', …)` 里（官方 ui-goal 就是这么写的）。
+        // 直接 `slots.register({name, key}, View)` 不会生效：宿主按 kind 查这个 keyed 子槽时查不到，
+        // 于是退回它自带的 fallback（真 GUI 实测：渲染成一行 "Unknown surface event: autofork-message"）。
+        slots.inject('conversation.chat.node', function () {
+          // `register` 正常返回卸载函数；拿不到也不能让整块崩掉（卡片是可选能力）。
+          return slots.register({ name: 'conversation.chat.node', key: CARD_KIND }, AutoforkCardView) ?? function () {}
+        })
+      } catch (error) {
+        // 卡片是可选能力（页签 / 按钮 / 焦点交付才是主体）：任何一步失败都只降级成
+        // "消息以原生方式呈现"，不能让整个客户端条目挂掉。
+        postNote('card.failed: ' + String(error))
+      }
+      return function () {
+        disposeSlot()
+        disposeEvents()
+        disposeStyles()
+      }
+    }
+
+    function installForkStyles() {
+      if (typeof document === 'undefined' || document.head === null || document.head === undefined) {
+        return function () {}
+      }
+      var existing = document.getElementById('dsh-autofork-styles')
+      var element = existing
+      if (element === null || element === undefined) {
+        element = document.createElement('style')
+        element.id = 'dsh-autofork-styles'
+        // 逐条照抄官方 `QueueDock.module.css` 的 `.action`（旁边编辑 / 删除 / 转向那三个按钮
+        // 用的就是它）——插件拿不到那个 CSS module 的哈希类名，只能复刻声明：
+        //
+        //   .action{corner-shape:round;width:28px;height:28px;color:var(--dsw-alias-label-tertiary);
+        //           cursor:pointer;background:0 0;border:none;border-radius:999px;flex:none;
+        //           place-items:center;padding:0;display:grid}
+        //   .action:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+        //   .action:focus-visible{outline:var(--dsw-focus-ring-width) solid
+        //           var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}
+        //   .action:disabled{cursor:default;opacity:.45}
+        //
+        // `corner-shape:round` 不能省：主题层默认把按钮渲染成超椭圆（squircle），少了它这个
+        // 圆形按钮会变成圆角方块（whale-girl 在官方 Switch 上踩过同一条）。
+        // 唯一与官方不同的地方是失败态的颜色（官方没有这个状态）——几何形状仍然一致。
+        element.textContent = [
+          '[data-dsh-autofork-fork]{corner-shape:round;width:28px;height:28px;',
+          'color:var(--dsw-alias-label-tertiary,#9a9a9a);cursor:pointer;background:0 0;border:none;',
+          'border-radius:999px;flex:none;place-items:center;padding:0;display:grid}',
+          '[data-dsh-autofork-fork]:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
+          '[data-dsh-autofork-fork]:focus-visible{outline:var(--dsw-focus-ring-width) solid ',
+          'var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}',
+          '[data-dsh-autofork-fork]:disabled{cursor:default;opacity:.45}',
+          '[data-dsh-autofork-fork][data-tone=error]{color:var(--dsw-alias-state-error-primary,#c62828)}',
+        ].join('')
+        document.head.appendChild(element)
+      }
+      return function () {
+        // 只回收本次真正插进去的那一个；别把别人（或上一次 apply）的样式带走。
+        if (existing === null || existing === undefined) {
+          if (element.parentNode !== null && element.parentNode !== undefined) element.parentNode.removeChild(element)
+        }
+      }
+    }
+
     /**
      * 「分叉」页签：本会话所在家族的完整家族树，点任意一行切过去。
      *
@@ -596,6 +1368,9 @@ window.__ModuleLoader__.load({
 
       var timer = null
       var stopped = false
+      /** 本插件注入的样式表卸载函数（见 installForkStyles）。 */
+      var styles = null
+      var cardStyles = null
 
       navTo = function (sessionId) {
         if (typeof sessionId !== 'string' || sessionId === '') return
@@ -623,9 +1398,7 @@ window.__ModuleLoader__.load({
        * @param {string} note 回报内容。
        */
       function report(note) {
-        fetch(HEALTH_PATH + '?client=1&note=' + encodeURIComponent(note), {
-          headers: { accept: 'application/json' },
-        }).catch(function () { /* 回报失败本身不必再报 */ })
+        postNote(note)
       }
 
       /**
@@ -681,6 +1454,9 @@ window.__ModuleLoader__.load({
               nodes: Array.isArray(body.nodes) ? body.nodes : [],
               // 服务端算好的"当前 driver"（链上最新的 head，没有下游就是本会话）。
               driver: body.driver === undefined ? null : body.driver,
+              // 服务端**此刻生效**的分叉方式：手动模式下队列行才有「分叉」按钮。
+              // 以服务端为准（而不是读设置文档），所以按钮不会出现在宿主不照它行事的时候。
+              mode: body.mode === 'manual' ? 'manual' : 'auto',
             })
             var handoff = body.handoff
             // 字段名必须与服务端一致：链式模型重写时服务端改成了 `sessionId`
@@ -708,7 +1484,7 @@ window.__ModuleLoader__.load({
         if (stopped) return
         var current = currentSessionId()
         if (current === undefined || current === null) {
-          publish({ current: undefined, nodes: [], driver: null })
+          publish({ current: undefined, nodes: [], driver: null, mode: 'auto' })
           return
         }
         poll(current)
@@ -739,7 +1515,30 @@ window.__ModuleLoader__.load({
             inject: function () { return {} },
           }, BranchView)
         })
+
+        // 手动分叉的「分叉」按钮：注册进 `conversation.input.dock`（list 槽，与官方队列条 /
+        // 任务条同一列），但组件本身**不画在这一列里**——它把按钮用 portal 挂进队列那一行
+        // 右侧（见 ForkDock 的注释：队列行的动作区是官方写死的，插件没有那个槽）。
+        slots.inject('conversation.input.dock', function () {
+          report('forkdock.mounted')
+          return slots.register({
+            name: 'conversation.input.dock',
+            id: 'fork',
+            order: 21,
+            inject: function () { return {} },
+          }, ForkDock)
+        })
+
+        // 消息卡：分叉通知 / 在飞摘要 / 后台回传三条长成官方那种卡片。
+        // 宿主**直接落盘**这三条（不占 turn），所以卡片必须由本模块自己画，见 CARD_KIND 的注释。
+        cardStyles = registerAutoforkCards(ctx, slots)
+
+        // Plugins 页上本插件的设置卡片（分叉方式）。走嵌套 inject，见 registerForkSettings。
+        registerForkSettings(ctx, slots)
       }
+
+      // 队列行上那个按钮要 `:hover`，内联样式表达不了——注入一小段样式，卸载时收回。
+      styles = installForkStyles()
 
       /* ------------------- 从头部胶囊改为页签（2026-09，用户决定） ------------------- */
 
@@ -763,6 +1562,14 @@ window.__ModuleLoader__.load({
         return function () {
           stopped = true
           stopPolling()
+          if (styles !== null) {
+            styles()
+            styles = null
+          }
+          if (cardStyles !== null) {
+            cardStyles()
+            cardStyles = null
+          }
         }
       }, 'dsh-autofork: 分叉关系 UI 与交付轮询')
     }
