@@ -167,6 +167,12 @@ DSH_AUTOFORK_DEBUG=/tmp/dsh-autofork-debug.log dsh web
 dsh plugin --profile web add https://github.com/vlln/plugin-registry.git#path:/packages/plugin/console
 ```
 
+## 变更记录
+
+面向使用者的版本变更见 [CHANGELOG.md](CHANGELOG.md)（`0.x` 期间新增功能与行为变更进 minor）。
+**改了插件源码后需要重启 `dsh web`**——host half 是 ESM 缓存的，刷新页面只会换客户端那半
+（症状：界面是新的、行为还是旧的）。
+
 ## 许可
 
 MIT
