@@ -1035,8 +1035,17 @@ window.__ModuleLoader__.load({
               if (typeof marker !== 'string') return null
               return { id: String(event.data.id), role: 'start' }
             },
-            start: function (context, match) {
+            start: function (context, match, reader) {
               var event = match.event
+              // 这条消息若是**本轮 turn 的开场触发**（被 next-turn 认领），官方 `input-message`
+              // 会把它渲染成 turn-trigger 卡片（后台回传走 `followup` 时就是这种情况）——
+              // 我们不再画第二张，否则同一个事件上会出现两张卡。判定与官方同源：
+              //   waking = reader.previous('inbox-next-turn')?.state.currentClaimed.has(id) === true || idleSteer
+              // `idleSteer` 那条我们不复制：它的三个前置（开场 step / claimSeq 关系 / 批里没有人类
+              // 消息）在本插件这三条消息上都不成立——通知与摘要走 next-step 与用户指令**同批**
+              // （claimedHuman=true），回传的两条路要么命中 next-turn，要么落进人类开场的轮里。
+              var nextTurn = reader?.previous?.('inbox-next-turn')?.state
+              if (nextTurn?.currentClaimed?.has(String(event.data.id)) === true) return undefined
               return {
                 id: match.id,
                 seq: event.seq,

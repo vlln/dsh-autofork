@@ -259,8 +259,9 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 | 卡片本体 | 本插件的**客户端节点定义**：`ctx.uiConversation.events.register({kind:'autofork-message', target:'chat', match/start/update/buildViewNode})` + 槽 `conversation.chat.node` 的 keyed 视图（官方 `ui-goal` 同一套 API）。宿主在 `source` 上打了 `autofork: 'notice'\|'digest'\|'reply'` 标记，客户端只认这三条，不抢别人的 agent 消息 |
 | 节点 `location` | **显式 `{kind:'unresolved'}`** —— 否则被当成 turn 的过程成员折叠掉（约束 4）；显示顺序仍由 `anchorSeq`（= 事件 seq）决定，所以仍是"通知 → 摘要 → 用户指令" |
 | 槽注册 | `slots.inject('conversation.chat.node', () => slots.register({name, key}, View))`——**必须包在 `inject` 里**；直接 `register` 会静默不生效，宿主渲染它自带的 fallback（实测：一行 `Unknown surface event: autofork-message`） |
+| 让位规则 | 这条消息若是**本轮 turn 的开场触发**（被 `next-turn` 认领，后台回传走 `followup` 时就是），官方 `input-message` 会把它渲染成 turn-trigger 卡片 ⇒ 我们的定义返回 `undefined`、`buildViewNode` 返回 `null`，**同一个事件绝不出现两张卡** |
 | 外观 | CSS 逐条照抄官方 `TurnTriggerNodeView.module.css`（`.5px` 边框 + `--dsw-radius-xl` + 主题背景 + 12/16 留白 + 折叠箭头），图标用官方 agent 图标 `IconPaperPlaneOutlineRegular` |
-| 后台回传 | head **已经开过口**（日志里有 `system/message`）⇒ 直接 `append` 成卡片（立刻出现、**不唤醒**、不多跑一轮）；还没开口 ⇒ 进 next-step 等它第一轮；撞上**悬空工具调用**窗口 ⇒ 排队等 idle 补落盘（事实 13） |
+| 后台回传 | 照官方 `dsh-subagent` 的 `notifySettlement` 语义：head **空闲** ⇒ `followup`（下一轮 + 唤醒）；**忙** ⇒ `steer`（并进它正在跑的那一轮 + 唤醒）。两路都唤醒，且落盘时机/位置由 loop 决定 ⇒ 既不会"卡片到了却没有模型调用"，也不可能撞 protected first row 或拆开 `tool_calls` |
 
 **被判掉的中间方案（留教训）**：
 
@@ -270,6 +271,11 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 - **走 next-step 靠官方 `idleSteer`**：`claimedHuman` 与 `nextTurn.claimSeq < turnStart` 两条都不满足
   （用户指令必然同批），卡片渲染成**不可见**上下文。
 - **直接 append 到会话开头**：撞 protected first row，把整条会话写成 corrupt。
+- **"只落一张卡片、不唤醒"**（为了省一次请求）：用户实测报的 bug —— A 那一轮跑完后 B 收到了卡片，
+  **却没有任何模型调用**，人无法判断 B 到底读没读。回传的语义是"后台会话给我发来一条消息"，
+  按 agent 消息的语义它就该被处理（官方在父会话空闲时也是唤醒的），这一次请求不该省。
+  改成走 inbox 之后，早先为直接落盘准备的 `hasSystemMessage` / 排队补写（`deferredHeadCards`）
+  整套机器一并删掉——**约束消失比满足约束更好**。
 
 ### 在飞摘要的裁剪：保最新，且省略处必须就地可见 ⚠️
 

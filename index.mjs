@@ -1154,58 +1154,6 @@ export function apply(ctx, config) {
     })
   }
 
-  /** 一张卡片 = 一次**直接落盘**的追加（不进 inbox、不开 turn、不额外请求模型）。 */
-  function appendCard(session, message) {
-    session.append('user/message', message, { surfaceOp: 'append' })
-  }
-
-  /**
-   * 这条会话此刻能不能插卡片。
-   *
-   * 唯一不能插的时机是**悬空工具调用**窗口：`assistant(tool_calls)` 与它的 `tool/result` 之间
-   * 插任何非 tool 消息都会让 provider 拒掉整条会话，而且**写坏是永久的**（事实 13）。
-   * @param {any} session 目标会话。
-   * @returns {boolean} 现在能否写。
-   */
-  function canAppendCard(session) {
-    return !hasDanglingToolCall(session)
-  }
-
-  /**
-   * 这条会话的日志里已经有它**自己的开场 `system/message`** 了吗。
-   *
-   * ⚠️ 会话格式的硬约束：一条会话的**第一条消息**必须是它自己的 system prompt（protected
-   * first row）。在它之前插任何 user/message 都会让整条日志变成 **corrupt**——而且
-   * **写入端不报错、宿主照跑**，只有重新打开这条会话时读取端才拒：
-   * `SessionFormatError: system/message requires a protected first row`
-   * （界面上是 `Failed to load history … is corrupt`）。真 GUI 实测踩到过一次。
-   * @param {any} session 目标会话。
-   * @returns {boolean} 已经有 system/message 就返回 true。
-   */
-  function hasSystemMessage(session) {
-    try {
-      return session.snapshotEvents().some(event => event?.type === 'system/message')
-    } catch (error) {
-      debug('card.snapshot-failed', { error: String(error) })
-      return false
-    }
-  }
-
-  /** 因悬空工具调用而排队待补的卡片（key = head id）；head 转 idle 时补落盘。 */
-  const deferredHeadCards = new Map()
-
-  /**
-   * 排一张待补的卡片。
-   * @param {string} headId 目标会话 id。
-   * @param {any} message 待补的消息。
-   * @returns {void}
-   */
-  function queueHeadCard(headId, message) {
-    const queue = deferredHeadCards.get(headId)
-    if (queue === undefined) deferredHeadCards.set(headId, [message])
-    else queue.push(message)
-  }
-
   /* ------------------------------ 建 head ------------------------------ */
 
   /**
@@ -1686,25 +1634,6 @@ export function apply(ctx, config) {
   // 所以这一刻追加**一定安全**，是补落盘的最佳时机。
   ctx.on('agent/status', ({ agent, status }) => {
     if (status !== 'idle') return
-    // 先补写"悬空工具调用窗口里排队的那张卡片"（顺序敏感：与下面的队列互不干涉）。
-    const queuedCards = deferredHeadCards.get(agent?.id)
-    if (queuedCards !== undefined) {
-      deferredHeadCards.delete(agent.id)
-      const remaining = []
-      for (const message of queuedCards) {
-        if (!canAppendCard(agent.session)) {
-          remaining.push(message)
-          continue
-        }
-        try {
-          appendCard(agent.session, message)
-          debug('report.flushed', { head: agent.id, messageId: message.id })
-        } catch (error) {
-          debug('report.flush-failed', { head: agent.id, error: String(error) })
-        }
-      }
-      if (remaining.length > 0) deferredHeadCards.set(agent.id, remaining)
-    }
     // 补写"容器开着 turn 时排队的 agent 答复"。
     const queuedAnswers = deferredAnswers.get(agent?.id)
     if (queuedAnswers !== undefined) {
@@ -1936,31 +1865,29 @@ export function apply(ctx, config) {
       return
     }
 
-    // 后台那条的产出同样是**直接落盘的一张卡片**：head 不会因此多跑一轮、也不会多一次请求，
-    // 卡片立刻出现（这正是用户要的"只出现那张卡片"），模型在它下一次 turn 里读到这条消息。
+    // **官方语义**（`dsh-subagent` 的 `notifySettlement` 逐字对齐）：
     //
-    // 唯一的约束来自**悬空工具调用**：往一条正在跑工具调用的会话里插 assistant/tool 之外的消息，
-    // 会把 `assistant(tool_calls)` 与它的 `tool/result` 拆开（事实 13，写坏是永久的）。
-    // 命中这个窗口就排队，等 head 转 idle 补落盘（见下面第三条 `agent/status` 订阅）。
+    //   parent.status === 'idle' ? 'queue' → parent.followup(message)   // 下一个 turn + 唤醒
+    //                            : 'steer' → parent.steer(message)      // 并进它正在跑的那一轮 + 唤醒
+    //
+    // 两路**都带唤醒**（官方只在"父会话正在关闭"时才退回不唤醒的 `inject`）。
+    //
+    // ⚠️ 这里踩过一个坑：早先为了"不多花一次请求"，回传改成"直接落盘一张卡片、不唤醒"。
+    // 结果就是用户实测报的 bug —— A 那一轮跑完后 B 收到了卡片，**却没有任何模型调用**，
+    // 用户无法判断 B 到底读没读。回传的语义是"后台会话给我发来一条消息"，它就该被处理；
+    // 这一次请求是该花的。
     const message = agentMessage(worker.id, text, 'reply')
-    if (!canAppendCard(head.session)) {
-      // 悬空工具调用窗口里插消息会把 `assistant(tool_calls)` 与它的结果拆开（事实 13）。
-      queueHeadCard(record.headId, message)
-      debug('report.deferred', {
+    if (head.status === 'idle') {
+      head.followup(message)
+      debug('report.woke', { worker: worker.id, head: record.headId, chars: text.length })
+    } else {
+      // 忙：并进它正在跑的那一轮的下一个 step。`steer` 的唤醒请求若在那一轮结束前没被认领，
+      // 会被 loop 的 `wakeRequested && hasPending` 带进下一轮 ⇒ 不会"消息躺着没人读"。
+      head.steer(message)
+      debug('report.steered', {
         worker: worker.id, head: record.headId, headStatus: head.status, chars: text.length,
       })
-      return
     }
-    if (hasSystemMessage(head.session)) {
-      // head 已经开过口 ⇒ 直接落盘，卡片立刻出现、它不会因此多跑一轮。
-      appendCard(head.session, message)
-      debug('report.appended', { worker: worker.id, head: record.headId, chars: text.length })
-      return
-    }
-    // head 连第一轮都还没跑（还没有自己的 system/message）：直接落盘会把整条日志写坏
-    // （protected first row），所以进 next-step，等它开第一轮时落在 system 之后。
-    head.send(message, 'next-step', false)
-    debug('report.queued', { worker: worker.id, head: record.headId, chars: text.length })
   }
 
   /* ------------------------------ 分叉调度工具 ------------------------------ */

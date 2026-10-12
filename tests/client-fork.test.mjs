@@ -325,7 +325,9 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
   } }
   assert.deepEqual(definition.match(card), { id: 'm-card', role: 'start' })
   const context = { key: '9:autofork-messagem-card', id: 'm-card', start: { location: { kind: 'unresolved' } }, state: undefined }
-  context.state = definition.start(context, { event: card, id: 'm-card' })
+  // 空闲的 reader：这条消息不是本轮 turn 的开场触发 ⇒ 官方会把它当不可见上下文 ⇒ 由我们画卡片
+  const reader = { previous: () => ({ state: { currentClaimed: new Set(['other']) } }) }
+  context.state = definition.start(context, { event: card, id: 'm-card' }, reader)
   const node = definition.buildViewNode(context)
   assert.equal(node.kind, 'autofork-message')
   assert.equal(node.visibility, 'visible', '不可见就等于没渲染——正是要避免的旧症状')
@@ -348,6 +350,14 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
   assert.equal(folded.props['data-open'], undefined, '默认折叠')
   assert.equal(bundle.stub.texts(folded).includes('分叉通知'), true,
     '标题按标记取（分叉通知 / 在飞进度 / 后台会话回复）')
+  // 后台回传走 followup 时这条消息**就是本轮的开场触发**：官方 input-message 会把它渲染成
+  // turn-trigger 卡片，我们必须让位，否则同一个事件上会出现两张卡。
+  const wakingReader = { previous: () => ({ state: { currentClaimed: new Set(['m-card']) } }) }
+  const wakingContext = { key: '16:autofork-messagem-card', id: 'm-card', start: { location: { kind: 'unresolved' } }, state: undefined }
+  wakingContext.state = definition.start(wakingContext, { event: card, id: 'm-card' }, wakingReader)
+  assert.equal(wakingContext.state, undefined, '被 next-turn 认领时不产出我们自己的节点')
+  assert.equal(definition.buildViewNode(wakingContext), null, 'buildViewNode 必须返回 null（让官方画）')
+
   const header = folded.children[0]
   assert.equal(typeof header.props.onClick, 'function', '头行可点击（折叠/展开）')
   header.props.onClick()  // 桩的 useState 是只读的，展开态由真 GUI 验证（见工程笔记）
