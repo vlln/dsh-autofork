@@ -243,14 +243,19 @@ test('页签渲染：树状图 —— 连线数、父子几何、卡片不重叠
   // ③ 父卡居中于它的孩子们；子卡的连线端点落在卡边中点上。
   const x = id => Number.parseFloat(boxes.get(id).left)
   const y = id => Number.parseFloat(boxes.get(id).top)
+  // 卡片尺寸从**渲染值**读，而不是把 `TREE` 的数字抄进测试：尺寸是观感参数、会随用户反馈调，
+  // 抄进来的话每次调尺寸都要改测试（而且很容易漏掉一处）。
+  const cw = Number.parseFloat(boxes.get('session-root').width)
+  const ch = Number.parseFloat(boxes.get('session-root').height)
+  assert.ok(cw > 0 && ch > 0, '卡片必须有显式尺寸（布局与连线的锚点）')
   assert.equal(x('session-root'), (x('session-a') + x('session-b')) / 2, '父节点居中于孩子')
   for (const path of paths) {
     const to = path.props.key
     const [x1, y1, , , , , x2, y2] = pathNumbers(path.props.d)
     const parent = to === 'session-c' ? 'session-a' : 'session-root'
-    assert.equal(x1, x(parent) + 88, '连线从父卡底边中点出发')
-    assert.equal(y1, y(parent) + 88, '连线从父卡底边出发')
-    assert.equal(x2, x(to) + 88, '连线进入子卡顶边中点')
+    assert.equal(x1, x(parent) + cw / 2, '连线从父卡底边中点出发')
+    assert.equal(y1, y(parent) + ch, '连线从父卡底边出发')
+    assert.equal(x2, x(to) + cw / 2, '连线进入子卡顶边中点')
     assert.equal(y2, y(to), '连线进入子卡顶边')
   }
 
@@ -258,8 +263,8 @@ test('页签渲染：树状图 —— 连线数、父子几何、卡片不重叠
   for (const one of cards) {
     for (const other of cards) {
       if (one === other) continue
-      const apart = Math.abs(x(cardId(one)) - x(cardId(other))) >= 176
-        || Math.abs(y(cardId(one)) - y(cardId(other))) >= 88
+      const apart = Math.abs(x(cardId(one)) - x(cardId(other))) >= cw
+        || Math.abs(y(cardId(one)) - y(cardId(other))) >= ch
       assert.ok(apart, `卡片重叠：${cardId(one)} 与 ${cardId(other)}`)
     }
   }
@@ -269,6 +274,54 @@ test('页签渲染：树状图 —— 连线数、父子几何、卡片不重叠
   const finished = paths.find(path => path.props.key === 'session-c')
   assert.match(String(running.props.stroke), /state-business-primary/, '运行中的那条连线用强调色')
   assert.match(String(finished.props.stroke), /border-l2/, '已结束的那条用中性色')
+
+  view.stop()
+})
+
+test('页签渲染：整张卡只有**一个** hover 详情，且含 session id / 触发指令等详细信息', async () => {
+  // 用户 2026-10 报的："卡片现在在不同位置 hover 有不同的信息" —— 以前名字/触发指令/相对时间/
+  // 值守胶囊各有自己的 title，鼠标在卡内移动会看到信息跳变。契约改成：**只有卡根一个 title**，
+  // 所有卡结构一致，内容覆盖完整会话 id、状态、触发指令、分叉时刻与动作提示。
+  const view = await mountView({
+    current: 'session-b',
+    nodes: [
+      node({ sessionId: 'session-root', label: '家族根', state: 'finished', busy: false, current: false, depth: 0, parentId: null }),
+      node({
+        sessionId: 'session-b', label: '乙', state: 'idle', busy: false, depth: 1, current: true,
+        parentId: 'session-root', ordinal: 2, at: Date.now() - 30_000, trigger: '把日志也改成 JSON',
+      }),
+    ],
+  })
+
+  const cards = view.rows
+  assert.equal(cards.length, 2)
+
+  /** 卡内（不含卡根自己）有没有别的 title —— 有就说明又散开了。 */
+  const innerTitles = (card, out = []) => {
+    for (const child of card.children ?? []) {
+      if (child === null || typeof child !== 'object') continue
+      if (Array.isArray(child)) { child.forEach(item => innerTitles(item, out)); continue }
+      if (child.props?.title !== undefined) out.push(child.type)
+      innerTitles(child, out)
+    }
+    return out
+  }
+
+  for (const card of cards) {
+    const id = String(card.props['data-session-id'])
+    const title = String(card.props.title)
+    assert.match(title, new RegExp('会话：' + id), '卡根 tooltip 必须带完整会话 id')
+    assert.match(title, /状态：(运行中|空闲|已结束)/, '带状态')
+    assert.match(title, /触发指令：/, '带触发指令（家族根给"—"）')
+    assert.match(title, /分叉于：/, '带分叉时刻')
+    assert.deepEqual(innerTitles(card), [], `${id} 卡内不该再有 title（否则 hover 信息会跳变）`)
+  }
+
+  const head = cards.find(card => card.props['data-session-id'] === 'session-b')
+  assert.match(String(head.props.title), /触发指令：把日志也改成 JSON/, '触发指令给全文（卡上是截断的）')
+  assert.match(String(head.props.title), /这就是你当前所在的会话/, '当前卡的动作提示')
+  const root = cards.find(card => card.props['data-session-id'] === 'session-root')
+  assert.match(String(root.props.title), /点击这张卡切到那条会话/, '别的卡给"点击切换"提示')
 
   view.stop()
 })

@@ -280,12 +280,12 @@ window.__ModuleLoader__.load({
         key: key,
         style: {
           flex: 'none',
-          padding: '1px 6px',
+          padding: '2px 8px',
           borderRadius: '999px',
           background: tint,
           color: color,
-          fontSize: '11px',
-          lineHeight: '16px',
+          fontSize: '12px',
+          lineHeight: '18px',
           whiteSpace: 'nowrap',
         },
       }, text)
@@ -297,11 +297,11 @@ window.__ModuleLoader__.load({
      * 树状图的度量。**布局与卡片共用这一份**——两处各写一份，连线端点就会飘。
      */
     var TREE = {
-      cardW: 176,
-      cardH: 88,
-      gapX: 14,
+      cardW: 216,
+      cardH: 104,
+      gapX: 16,
       /** 层高 = 卡高 + 连线通道：父卡底边到子卡顶边留出 S 曲线的余地（同 dsh-context 的 `LEVEL_H`）。 */
-      levelH: 120,
+      levelH: 148,
       padX: 6,
       padY: 4,
     }
@@ -475,6 +475,10 @@ window.__ModuleLoader__.load({
      * 一张卡回答三件事（与列表版一致，只是换了载体）：**这是哪条会话**（徽章 + 名字）、
      * **它此刻在干什么**（活着才挂状态胶囊；已结束的整张变淡）、**这次分叉是为什么、多久之前**
      * （触发指令 + 右侧相对时间）。
+     *
+     * **hover 契约**：整张卡只有**一个** tooltip（挂在卡根上），内容是完整会话 id、状态、
+     * 触发指令全文、分叉时刻（绝对 + 相对）与动作提示；卡内任何元素都不再自带 title——
+     * 否则鼠标在卡内移动会看到信息跳变（用户 2026-10 报的"不同位置 hover 有不同信息"）。
      */
     function FamilyNodeCard(props) {
       var node = props.node
@@ -509,10 +513,20 @@ window.__ModuleLoader__.load({
         // 稳定的 DOM 锚：渲染自证按它认卡，浏览器里排障（或 CDP 检查）也按它查。
         'data-session-id': node.sessionId,
         'aria-current': isCurrent ? 'true' : undefined,
-        title: isCurrent
-          ? node.sessionId
-          : '点击切到这条会话（' + node.sessionId + '）'
-            + (rel === '' ? '' : (clock === '' ? '' : '，分叉于 ' + clock)),
+        // **整张卡一个 tooltip**（用户 2026-10 要求）：以前名字/触发指令/时间/值守胶囊各有
+        // 自己的 title，鼠标落在卡内不同位置会看到不同信息。现在卡内**不再有任何** title，
+        // 只有这里一处，且所有卡结构一致（原生多行 tooltip，与侧栏会话行同一套观感）。
+        title: [
+          (isRoot ? '家族根' : '⑂' + String(ordinal)) + '　' + label,
+          '会话：' + node.sessionId,
+          '状态：' + meta.text
+            + (isCurrent ? '（你在这里）' : (isDriver ? '（现在回答你的是它）' : '')),
+          trigger === '' ? '触发指令：—（家族根是用户自己开的会话）' : '触发指令：' + trigger,
+          node.at === null || node.at === undefined
+            ? '分叉于：—'
+            : '分叉于：' + (clock === '' ? '' : clock) + (rel === '' ? '' : '（' + rel + '）'),
+          isCurrent ? '这就是你当前所在的会话' : '点击这张卡切到那条会话',
+        ].join('\n'),
         onClick: navigate,
         onKeyDown: function (event) {
           if (event.key === 'Enter' || event.key === ' ') {
@@ -529,12 +543,12 @@ window.__ModuleLoader__.load({
           width: String(TREE.cardW) + 'px',
           height: String(TREE.cardH) + 'px',
           boxSizing: 'border-box',
-          padding: '8px 10px',
+          padding: '10px 12px',
           display: 'flex',
           flexDirection: 'column',
-          gap: '4px',
+          gap: '5px',
           overflow: 'hidden',
-          borderRadius: '10px',
+          borderRadius: '12px',
           background: isCurrent
             ? TOKEN.hover
             : 'var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.04))',
@@ -559,16 +573,16 @@ window.__ModuleLoader__.load({
             key: 'badge',
             style: {
               flex: 'none',
-              marginTop: '1px',
-              width: '28px',
-              height: '18px',
+              marginTop: '2px',
+              width: '32px',
+              height: '21px',
               borderRadius: '5px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               background: isRoot ? 'rgba(127, 127, 127, 0.12)' : 'rgba(11, 107, 203, 0.12)',
               color: isRoot ? TOKEN.labelSecondary : TOKEN.accent,
-              fontSize: '10.5px',
+              fontSize: '12px',
               fontWeight: '600',
             },
           }, isRoot ? '根' : '⑂' + String(ordinal)),
@@ -577,8 +591,8 @@ window.__ModuleLoader__.load({
             style: {
               flex: '1 1 auto',
               minWidth: '0',
-              fontSize: '12px',
-              lineHeight: '15px',
+              fontSize: '13px',
+              lineHeight: '16px',
               fontWeight: isCurrent ? '600' : '400',
               color: TOKEN.labelPrimary,
               // 两行封顶：卡高固定，标题换行不该把下面的状态行挤出卡片。
@@ -597,12 +611,11 @@ window.__ModuleLoader__.load({
         }, [
           React.createElement('span', {
             key: 'trigger',
-            title: trigger === '' ? '' : '触发这次分叉的指令：' + trigger,
             style: {
               flex: '1 1 auto',
               minWidth: '0',
-              fontSize: '10.5px',
-              lineHeight: '14px',
+              fontSize: '11.5px',
+              lineHeight: '15px',
               color: TOKEN.labelTertiary,
               whiteSpace: 'nowrap',
               overflow: 'hidden',
@@ -611,8 +624,7 @@ window.__ModuleLoader__.load({
           }, trigger === '' ? '' : '触发：' + trigger),
           React.createElement('span', {
             key: 'at',
-            title: clock === '' ? '' : '分叉于 ' + clock,
-            style: { flex: 'none', fontSize: '10.5px', lineHeight: '14px', color: TOKEN.caption },
+            style: { flex: 'none', fontSize: '11.5px', lineHeight: '15px', color: TOKEN.caption },
           }, rel),
         ]) : null,
         React.createElement('div', {
@@ -625,8 +637,7 @@ window.__ModuleLoader__.load({
           (isDriver && !isCurrent)
             ? React.createElement('span', {
               key: 'driver',
-              title: '现在回答你的是它',
-              style: { flex: 'none', fontSize: '10.5px', lineHeight: '16px', color: TOKEN.labelSecondary },
+              style: { flex: 'none', fontSize: '11.5px', lineHeight: '17px', color: TOKEN.labelSecondary },
             }, '在回答你')
             : null,
         ]),
