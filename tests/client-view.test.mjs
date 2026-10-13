@@ -185,3 +185,90 @@ test('页签渲染：只有自己一条会话时给"还没有分叉"的引导，
     view.stop()
   }
 })
+
+/** 从元素树里按标签名收集元素（`svg` / `path` / `div`…）。 */
+function collect(node, type, out = []) {
+  if (node === null || typeof node === 'string') return out
+  if (Array.isArray(node)) {
+    node.forEach(child => collect(child, type, out))
+    return out
+  }
+  if (node.type === type) out.push(node)
+  collect(node.children, type, out)
+  return out
+}
+
+/** 把 SVG path 的 `d` 拆成数字序列（本插件只生成 `M x1 y1 C x1 y1+k, x2 y2-k, x2 y2`）。 */
+function pathNumbers(d) {
+  return String(d).match(/-?\d+(?:\.\d+)?/g).map(Number)
+}
+
+test('页签渲染：树状图 —— 连线数、父子几何、卡片不重叠（这是"树"而非缩进列表的判据）', async () => {
+  const now = Date.now()
+  const view = await mountView({
+    current: 'session-b',
+    nodes: [
+      node({ sessionId: 'session-root', label: '家族根', state: 'finished', busy: false, current: false, depth: 0, parentId: null }),
+      node({
+        sessionId: 'session-a', label: '甲', state: 'running', busy: true, depth: 1, current: false,
+        parentId: 'session-root', ordinal: 1, at: now - 60_000, trigger: '甲触发',
+      }),
+      node({
+        sessionId: 'session-b', label: '乙', state: 'idle', busy: false, depth: 1, current: true,
+        parentId: 'session-root', ordinal: 2, at: now - 30_000, trigger: '乙触发',
+      }),
+      node({
+        sessionId: 'session-c', label: '丙', state: 'finished', busy: false, depth: 2, current: false,
+        parentId: 'session-a', ordinal: 3, at: now - 10_000, trigger: '丙触发',
+      }),
+    ],
+  })
+
+  const cards = view.rows                                            // role=button 的卡片
+  const paths = collect(view.tree, 'path')
+  const cardId = card => String(card.props['data-session-id'])
+  const boxes = new Map(cards.map(card => [cardId(card), card.props.style]))
+
+  // ① 一条边一条连线：4 个节点 3 条边（缩进列表时代这里会是 0 条）。
+  assert.equal(cards.length, 4, '四个节点四张卡')
+  assert.equal(paths.length, 3, '三条边三条连线')
+
+  // ② 卡片是**绝对定位**在树画布上（不是靠 marginLeft 缩进的列表行）。
+  for (const card of cards) {
+    assert.equal(card.props.style.position, 'absolute', '卡片必须绝对定位在画布上')
+  }
+  const tops = new Set(cards.map(card => card.props.style.top))
+  assert.equal(tops.size, 3, '三层各有一条水平线')
+
+  // ③ 父卡居中于它的孩子们；子卡的连线端点落在卡边中点上。
+  const x = id => Number.parseFloat(boxes.get(id).left)
+  const y = id => Number.parseFloat(boxes.get(id).top)
+  assert.equal(x('session-root'), (x('session-a') + x('session-b')) / 2, '父节点居中于孩子')
+  for (const path of paths) {
+    const to = path.props.key
+    const [x1, y1, , , , , x2, y2] = pathNumbers(path.props.d)
+    const parent = to === 'session-c' ? 'session-a' : 'session-root'
+    assert.equal(x1, x(parent) + 88, '连线从父卡底边中点出发')
+    assert.equal(y1, y(parent) + 88, '连线从父卡底边出发')
+    assert.equal(x2, x(to) + 88, '连线进入子卡顶边中点')
+    assert.equal(y2, y(to), '连线进入子卡顶边')
+  }
+
+  // ④ 同层不重叠：任何两张卡都不该在水平与垂直上同时贴近。
+  for (const one of cards) {
+    for (const other of cards) {
+      if (one === other) continue
+      const apart = Math.abs(x(cardId(one)) - x(cardId(other))) >= 176
+        || Math.abs(y(cardId(one)) - y(cardId(other))) >= 88
+      assert.ok(apart, `卡片重叠：${cardId(one)} 与 ${cardId(other)}`)
+    }
+  }
+
+  // ⑤ 在跑的那条用强调色连线（状态映射到图上，不是随机配色）。
+  const running = paths.find(path => path.props.key === 'session-a')
+  const finished = paths.find(path => path.props.key === 'session-c')
+  assert.match(String(running.props.stroke), /state-business-primary/, '运行中的那条连线用强调色')
+  assert.match(String(finished.props.stroke), /border-l2/, '已结束的那条用中性色')
+
+  view.stop()
+})

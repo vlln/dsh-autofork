@@ -291,31 +291,199 @@ window.__ModuleLoader__.load({
       }, text)
     }
 
+    /* ------------------------------ 「分叉」页签的树状图 ------------------------------ */
+
     /**
-     * 家族链条里的一行。
-     *
-     * 一行要回答三件事（都是用户视角的问题）：
-     * ① **这是哪条会话**——名字（`⑂1 修 GUI 卡顿`）+ 会话短 id；
-     * ② **它此刻在干什么**——互斥三态中的一态；
-     * ③ **这次分叉是为什么、什么时候发生的**——触发它的那条用户指令 + 相对时间。
-     *    （③ 是同族几条第名字完全一样时的唯一区分，见 `trigger` 字段。）
-     *
-     * 只读本模块的 store（不依赖槽位 props），点击走 `navTo()`，也就是那条已经验证过的
-     * "先 refresh、再按寻址方式打开、确认 current 真变了"的路。
-     * @param {object} props `{node, driver, now}`。
-     * @returns {object} React 元素。
+     * 树状图的度量。**布局与卡片共用这一份**——两处各写一份，连线端点就会飘。
      */
-    function BranchRow(props) {
+    var TREE = {
+      cardW: 176,
+      cardH: 88,
+      gapX: 14,
+      /** 层高 = 卡高 + 连线通道：父卡底边到子卡顶边留出 S 曲线的余地（同 dsh-context 的 `LEVEL_H`）。 */
+      levelH: 120,
+      padX: 6,
+      padY: 4,
+    }
+
+    /**
+     * 把服务端的**平铺节点表**折成一棵可画的树（整洁树布局 / tidy tree）。
+     *
+     * ⚠️ 服务端给的是 **BFS 顺序**（根 → 它的孩子们 → 再下一层），所以这里**不能**把数组
+     * 顺序当 DFS 用，必须自己按 `parentId` 重建父子关系——否则兄弟顺序看起来对、层级却错。
+     *
+     * 布局规则照 `dsh-context` 的 subagent 树：**叶子按顺序各占一个槽，父节点居中于它的
+     * 孩子们**。于是同层任意两张卡的水平距离 ≥ 一个槽距（不会叠），而"谁从谁分出来"一眼
+     * 看得出——这正是把层次列表换成树状图要买到的东西。
+     *
+     * 认不出父的节点（父不在表里、或自指）一律当根画出来：宁可多一个根，也不能"数据在
+     * 表里却不显示"。
+     * @param {Array<any>} nodes 服务端 `familyNodes()` 的平铺节点（BFS 序）。
+     * @returns {{width: number, height: number, points: Array<any>, links: Array<any>}} 画布尺寸、节点坐标、连线。
+     */
+    function layoutFamily(nodes) {
+      var byId = new Map()
+      var index = 0
+      for (index = 0; index < nodes.length; index += 1) byId.set(nodes[index].sessionId, nodes[index])
+
+      var childrenOf = new Map()
+      var roots = []
+      for (index = 0; index < nodes.length; index += 1) {
+        var node = nodes[index]
+        var parent = node.parentId
+        if (parent !== null && parent !== undefined && parent !== node.sessionId && byId.has(parent)) {
+          var kids = childrenOf.get(parent)
+          if (kids === undefined) childrenOf.set(parent, [node])
+          else kids.push(node)
+        } else {
+          roots.push(node)
+        }
+      }
+
+      var slotOf = new Map()
+      var depthOf = new Map()
+      var visited = new Set()
+      var leaves = 0
+      var place = function (item, depth) {
+        visited.add(item.sessionId)
+        depthOf.set(item.sessionId, depth)
+        var children = (childrenOf.get(item.sessionId) || []).filter(function (child) {
+          return !visited.has(child.sessionId)
+        })
+        var slot = -1
+        if (children.length === 0) {
+          slot = leaves
+          leaves += 1
+        } else {
+          var first = -1
+          var last = -1
+          for (var k = 0; k < children.length; k += 1) {
+            var placed = place(children[k], depth + 1)
+            if (placed < 0) continue
+            if (first < 0) first = placed
+            last = placed
+          }
+          if (first < 0) { slot = leaves; leaves += 1 } else { slot = (first + last) / 2 }
+        }
+        slotOf.set(item.sessionId, slot)
+        return slot
+      }
+      // 先画根们，再兜一圈处理"谁都认不出的孤点"，保证每个节点都有槽位。
+      for (index = 0; index < roots.length; index += 1) {
+        if (!visited.has(roots[index].sessionId)) place(roots[index], 0)
+      }
+      for (index = 0; index < nodes.length; index += 1) {
+        if (!visited.has(nodes[index].sessionId)) place(nodes[index], 0)
+      }
+
+      var pitch = TREE.cardW + TREE.gapX
+      var points = []
+      var pointById = new Map()
+      var maxDepth = 0
+      for (index = 0; index < nodes.length; index += 1) {
+        var current = nodes[index]
+        if (!slotOf.has(current.sessionId)) continue
+        var depth = depthOf.get(current.sessionId) || 0
+        if (depth > maxDepth) maxDepth = depth
+        var point = {
+          node: current,
+          depth: depth,
+          x: TREE.padX + slotOf.get(current.sessionId) * pitch,
+          y: TREE.padY + depth * TREE.levelH,
+        }
+        points.push(point)
+        pointById.set(current.sessionId, point)
+      }
+
+      var links = []
+      for (index = 0; index < points.length; index += 1) {
+        var child = points[index]
+        var parentId = child.node.parentId
+        var from = parentId === null || parentId === undefined ? undefined : pointById.get(parentId)
+        if (from === undefined) continue
+        links.push({
+          to: child.node.sessionId,
+          running: child.node.state === 'running',
+          x1: from.x + TREE.cardW / 2,
+          y1: from.y + TREE.cardH,
+          x2: child.x + TREE.cardW / 2,
+          y2: child.y,
+        })
+      }
+
+      return {
+        width: Math.max(1, leaves) * pitch - TREE.gapX + TREE.padX * 2,
+        height: maxDepth * TREE.levelH + TREE.cardH + TREE.padY * 2,
+        points: points,
+        links: links,
+      }
+    }
+
+    /**
+     * 连线的 S 曲线：两端**垂直**切入卡片边（父卡底边 → 子卡顶边），曲率随落差增长并夹在
+     * [24, 96]（同 `dsh-context` 的 `linkPath`）。多层树里斜直线会读成"斜穿"，切线才对得上。
+     * @param {number} x1 父卡底边中点 x。
+     * @param {number} y1 父卡底边 y。
+     * @param {number} x2 子卡顶边中点 x。
+     * @param {number} y2 子卡顶边 y。
+     * @returns {string} SVG path 的 `d`。
+     */
+    function linkPath(x1, y1, x2, y2) {
+      var k = Math.min(96, Math.max(24, (y2 - y1) * 0.5))
+      return 'M ' + String(x1) + ' ' + String(y1)
+        + ' C ' + String(x1) + ' ' + String(y1 + k)
+        + ', ' + String(x2) + ' ' + String(y2 - k)
+        + ', ' + String(x2) + ' ' + String(y2)
+    }
+
+    /**
+     * 悬停一张卡时要点亮的**血统**：它的祖先链 + 它自己的整棵子树（其余淡出）。
+     *
+     * 这是树状图相对层次列表真正多出来的可读性——一眼看清"它从谁分出来"与"谁又是它的后代"。
+     * @param {Array<any>} nodes 平铺节点。
+     * @param {string|null} id 悬停的会话 id。
+     * @returns {Set<string>} 要点亮的会话 id。
+     */
+    function lineageOf(nodes, id) {
+      var byId = new Map()
+      var index = 0
+      for (index = 0; index < nodes.length; index += 1) byId.set(nodes[index].sessionId, nodes[index])
+      var lit = new Set()
+      var cursor = byId.get(id)
+      while (cursor !== undefined) {
+        lit.add(cursor.sessionId)
+        cursor = cursor.parentId === null || cursor.parentId === undefined
+          ? undefined
+          : byId.get(cursor.parentId)
+      }
+      var queue = [id]
+      for (index = 0; index < queue.length; index += 1) {
+        for (var j = 0; j < nodes.length; j += 1) {
+          var child = nodes[j]
+          if (child.parentId === queue[index] && !lit.has(child.sessionId)) {
+            lit.add(child.sessionId)
+            queue.push(child.sessionId)
+          }
+        }
+      }
+      return lit
+    }
+
+    /**
+     * 树状图上的一张节点卡。
+     *
+     * 一张卡回答三件事（与列表版一致，只是换了载体）：**这是哪条会话**（徽章 + 名字）、
+     * **它此刻在干什么**（活着才挂状态胶囊；已结束的整张变淡）、**这次分叉是为什么、多久之前**
+     * （触发指令 + 右侧相对时间）。
+     */
+    function FamilyNodeCard(props) {
       var node = props.node
       var driver = props.driver
       var now = props.now
       var isCurrent = node.current === true
       var isDriver = driver !== null && driver !== undefined && driver.sessionId === node.sessionId
       var isRoot = node.parentId === null || node.parentId === undefined
-      var hoverPair = React.useState(false)
-      var hover = hoverPair[0]
-      var setHover = hoverPair[1]
-
+      var hover = props.hovered === true
       var meta = STATE_META[node.state] === undefined
         ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
         : STATE_META[node.state]
@@ -330,124 +498,138 @@ window.__ModuleLoader__.load({
       var trigger = typeof node.trigger === 'string' ? node.trigger : ''
       var rel = relTime(node.at, now)
       var clock = clockOf(node.at)
+      var finished = node.state === 'finished'
+      // 与列表版同一条判断：已结束的卡整张变淡，不再挂一枚重复的"已结束"胶囊。
+      var showState = finished !== true
 
-      // 第二行：只渲染**有**的部分。家族根既没有触发指令也没有分叉时刻（它是用户自己
-      // 开的会话），于是它那一行只剩会话坐标，而不是一排空标签。
-      var info = []
-      if (trigger !== '') {
-        info.push(React.createElement('span', {
-          key: 'trigger',
-          title: '触发这次分叉的指令：' + trigger,
-          style: {
-            minWidth: '0',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            color: TOKEN.labelSecondary,
-          },
-        }, '触发：' + trigger))
-      }
-      if (rel !== '') {
-        info.push(React.createElement('span', {
-          key: 'at',
-          title: clock === '' ? '' : '分叉于 ' + clock,
-          style: { flex: 'none', color: TOKEN.labelTertiary },
-        }, rel))
-      }
-
-      // 状态胶囊只在**活着的**行上出现：已结束的行整行已经变淡，再挂一枚"已结束"胶囊是
-      // 纯重复（用户反馈"文字太多、噪声大"）。于是整棵树里只有"还在占资源"的那几行有颜色，
-      // 一眼就能看出谁还在跑。
-      var showState = node.state !== 'finished'
-      var topRow = [
-        React.createElement('span', {
-          key: 'label',
-          style: {
-            minWidth: '0',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            fontWeight: isCurrent ? '600' : '400',
-          },
-        }, label),
-        isCurrent ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
-        isDriver && !isCurrent ? chip('driver', '现在回答你的是它', TOKEN.labelSecondary, 'rgba(127, 127, 127, 0.14)') : null,
-        React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
-        showState ? chip('state', meta.text, meta.color, meta.tint) : null,
-      ]
-
+      var navigate = function () { if (!isCurrent) navTo(node.sessionId) }
       return React.createElement('div', {
         role: 'button',
         tabIndex: 0,
-        title: isCurrent ? node.sessionId : '点击切到这条会话（' + node.sessionId + '）',
+        // 稳定的 DOM 锚：渲染自证按它认卡，浏览器里排障（或 CDP 检查）也按它查。
+        'data-session-id': node.sessionId,
         'aria-current': isCurrent ? 'true' : undefined,
-        onClick: function () { if (!isCurrent) navTo(node.sessionId) },
+        title: isCurrent
+          ? node.sessionId
+          : '点击切到这条会话（' + node.sessionId + '）'
+            + (rel === '' ? '' : (clock === '' ? '' : '，分叉于 ' + clock)),
+        onClick: navigate,
         onKeyDown: function (event) {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault()
-            if (!isCurrent) navTo(node.sessionId)
+            navigate()
           }
         },
-        onMouseEnter: function () { setHover(true) },
-        onMouseLeave: function () { setHover(false) },
+        onMouseEnter: function () { props.onHover(node.sessionId) },
+        onMouseLeave: function () { props.onHover(null) },
         style: {
-          display: 'flex',
-          alignItems: 'flex-start',
-          gap: '10px',
-          // 缩进表达树上位置（0 = 家族根）。树是"同一条会话被分叉多次"的多叉，
-          // 所以深度缩进 + 行首的 └ 记号，比在行内画连线更省地方也更好读。
-          marginLeft: String(node.depth * 14) + 'px',
+          position: 'absolute',
+          left: String(props.point.x) + 'px',
+          top: String(props.point.y) + 'px',
+          width: String(TREE.cardW) + 'px',
+          height: String(TREE.cardH) + 'px',
+          boxSizing: 'border-box',
           padding: '8px 10px',
-          border: '1px solid ' + (isCurrent ? TOKEN.accent : 'transparent'),
-          borderRadius: '8px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px',
+          overflow: 'hidden',
+          borderRadius: '10px',
           background: isCurrent
             ? TOKEN.hover
-            : (hover ? TOKEN.hover : 'transparent'),
+            : 'var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.04))',
+          border: '1px solid ' + (isCurrent
+            ? TOKEN.accent
+            : 'var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.22))'),
+          // 悬停抬升 + 阴影；当前那条不动（它就在你眼前，不需要再"抬"）。
+          boxShadow: hover && !isCurrent ? '0 2px 10px rgba(127, 127, 127, 0.24)' : 'none',
+          transform: hover && !isCurrent ? 'translateY(-1px)' : 'none',
           cursor: isCurrent ? 'default' : 'pointer',
-          // 已结束的行再淡一档：它只是历史，不该跟"正在跑"的抢注意力。
-          color: isCurrent
-            ? TOKEN.labelPrimary
-            : (node.state === 'finished' ? TOKEN.caption : TOKEN.labelSecondary),
+          // 血统聚焦：与悬停那张卡无关的卡淡出（与连线的淡出同一套）。
+          opacity: props.dimmed === true ? 0.42 : 1,
+          transition: 'opacity 120ms ease, box-shadow 120ms ease, transform 120ms ease',
+          color: isCurrent ? TOKEN.labelPrimary : (finished ? TOKEN.caption : TOKEN.labelSecondary),
         },
       }, [
-        React.createElement('span', {
-          key: 'badge',
-          style: {
-            flex: 'none',
-            width: '30px',
-            height: '20px',
-            borderRadius: '5px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: isRoot ? 'rgba(127, 127, 127, 0.12)' : 'rgba(11, 107, 203, 0.12)',
-            color: isRoot ? TOKEN.labelSecondary : TOKEN.accent,
-            fontSize: '11px',
-            fontWeight: '600',
-          },
-        }, isRoot ? '根' : '⑂' + String(ordinal)),
         React.createElement('div', {
-          key: 'body',
-          style: { flex: '1 1 auto', minWidth: '0', display: 'flex', flexDirection: 'column', gap: '1px' },
+          key: 'top',
+          style: { display: 'flex', alignItems: 'flex-start', gap: '6px', minWidth: '0' },
         }, [
+          React.createElement('span', {
+            key: 'badge',
+            style: {
+              flex: 'none',
+              marginTop: '1px',
+              width: '28px',
+              height: '18px',
+              borderRadius: '5px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: isRoot ? 'rgba(127, 127, 127, 0.12)' : 'rgba(11, 107, 203, 0.12)',
+              color: isRoot ? TOKEN.labelSecondary : TOKEN.accent,
+              fontSize: '10.5px',
+              fontWeight: '600',
+            },
+          }, isRoot ? '根' : '⑂' + String(ordinal)),
           React.createElement('div', {
-            key: 'top',
-            style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0' },
-          }, topRow),
-          React.createElement('div', {
-            key: 'info',
-            style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0', fontSize: '12px' },
-          }, info),
+            key: 'label',
+            style: {
+              flex: '1 1 auto',
+              minWidth: '0',
+              fontSize: '12px',
+              lineHeight: '15px',
+              fontWeight: isCurrent ? '600' : '400',
+              color: TOKEN.labelPrimary,
+              // 两行封顶：卡高固定，标题换行不该把下面的状态行挤出卡片。
+              display: '-webkit-box',
+              WebkitBoxOrient: 'vertical',
+              WebkitLineClamp: '2',
+              overflow: 'hidden',
+              overflowWrap: 'anywhere',
+            },
+          }, label),
         ]),
-        isCurrent ? null : React.createElement('span', {
-          key: 'go',
-          style: {
-            flex: 'none',
-            color: hover ? TOKEN.accent : TOKEN.caption,
-            fontSize: '14px',
-            lineHeight: '20px',
-          },
-        }, '›'),
+        // 第二行：触发指令（可能是"这次分叉为什么发生"的唯一线索）+ 右对齐的相对时间。
+        (trigger !== '' || rel !== '') ? React.createElement('div', {
+          key: 'meta',
+          style: { display: 'flex', alignItems: 'baseline', gap: '6px', minWidth: '0' },
+        }, [
+          React.createElement('span', {
+            key: 'trigger',
+            title: trigger === '' ? '' : '触发这次分叉的指令：' + trigger,
+            style: {
+              flex: '1 1 auto',
+              minWidth: '0',
+              fontSize: '10.5px',
+              lineHeight: '14px',
+              color: TOKEN.labelTertiary,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            },
+          }, trigger === '' ? '' : '触发：' + trigger),
+          React.createElement('span', {
+            key: 'at',
+            title: clock === '' ? '' : '分叉于 ' + clock,
+            style: { flex: 'none', fontSize: '10.5px', lineHeight: '14px', color: TOKEN.caption },
+          }, rel),
+        ]) : null,
+        React.createElement('div', {
+          key: 'foot',
+          style: { marginTop: 'auto', display: 'flex', alignItems: 'center', gap: '6px', minWidth: '0' },
+        }, [
+          showState ? chip('state', meta.text, meta.color, meta.tint) : null,
+          isCurrent ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+          // 卡只有 176px 宽，所以这里用紧凑写法；完整含义留在 tooltip 上。
+          (isDriver && !isCurrent)
+            ? React.createElement('span', {
+              key: 'driver',
+              title: '现在回答你的是它',
+              style: { flex: 'none', fontSize: '10.5px', lineHeight: '16px', color: TOKEN.labelSecondary },
+            }, '在回答你')
+            : null,
+        ]),
       ])
     }
 
@@ -1180,6 +1362,11 @@ window.__ModuleLoader__.load({
       // 所以自己每 30 秒推一次重渲染：粒度粗到不会看到数字乱跳，也够用来看"这条还在跑多久了"。
       var tickPair = React.useState(0)
       var setTick = tickPair[1]
+      // 悬停在哪张卡上（null = 没悬停）。它同时驱动两件事：那张卡的抬升、以及**血统聚焦**
+      // （祖先链 + 子树高亮，其余淡出）——树状图相对层次列表多出来的可读性就在这条上。
+      var hoverPair = React.useState(null)
+      var hoverId = hoverPair[0]
+      var setHoverId = hoverPair[1]
       React.useEffect(function () {
         var timer = setInterval(function () { setTick(function (value) { return value + 1 }) }, 30000)
         return function () { clearInterval(timer) }
@@ -1219,14 +1406,59 @@ window.__ModuleLoader__.load({
             style: { color: TOKEN.labelTertiary, fontSize: '12px' },
           }, summary.join(' · ')),
         ]))
-        children.push(React.createElement('div', {
-          key: 'rows',
-          style: { display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '8px' },
-        }, nodes.map(function (node) {
-          return React.createElement(BranchRow, {
-            key: node.sessionId, node: node, driver: driver, now: now,
+        // 树状图：**连线层（SVG）+ 卡片层（绝对定位）**，与 dsh-context 的 subagent 树同一套语法。
+        // 连线的端点落在卡片的边中点上，所以布局与卡片必须共用 `TREE` 的度量（改一处就得改另一处）。
+        var tree = layoutFamily(nodes)
+        var lit = hoverId === null ? null : lineageOf(nodes, hoverId)
+        var cards = tree.points.map(function (point) {
+          return React.createElement(FamilyNodeCard, {
+            key: point.node.sessionId,
+            node: point.node,
+            point: point,
+            driver: driver,
+            now: now,
+            hovered: hoverId === point.node.sessionId,
+            dimmed: lit !== null && !lit.has(point.node.sessionId),
+            onHover: setHoverId,
           })
-        })))
+        })
+        // 连线层先建好，再套进画布——层级压平，阅读与改动都不容易数错括号。
+        var links = React.createElement('svg', {
+          key: 'links',
+          width: String(tree.width),
+          height: String(tree.height),
+          viewBox: '0 0 ' + String(tree.width) + ' ' + String(tree.height),
+          // 连线层**永远不吃指针**：卡片在它上面，点卡才是切会话。
+          style: { position: 'absolute', inset: '0', pointerEvents: 'none', overflow: 'visible' },
+        }, tree.links.map(function (link) {
+          var on = lit === null ? true : lit.has(link.to)
+          return React.createElement('path', {
+            key: link.to,
+            d: linkPath(link.x1, link.y1, link.x2, link.y2),
+            fill: 'none',
+            stroke: link.running
+              ? TOKEN.accent
+              : 'var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.38))',
+            strokeWidth: link.running ? 1.6 : 1.2,
+            strokeOpacity: on ? (link.running ? 0.9 : 0.5) : 0.12,
+            style: { transition: 'stroke-opacity 120ms ease' },
+          })
+        }))
+        var canvas = React.createElement('div', {
+          key: 'canvas',
+          style: {
+            position: 'relative',
+            width: String(tree.width) + 'px',
+            height: String(tree.height) + 'px',
+            margin: '0 auto',
+          },
+        }, [links].concat(cards))
+        children.push(React.createElement('div', {
+          key: 'tree',
+          // 家族宽了就横向滚动，而不是把卡片压扁 —— 树形要看得清"谁挂在谁下面"，
+          // 压缩到看不清从属关系就白换了。
+          style: { marginTop: '8px', overflowX: 'auto', overscrollBehaviorX: 'contain' },
+        }, canvas))
         if (nodes.length === 1) {
           children.push(React.createElement('div', {
             key: 'empty',
