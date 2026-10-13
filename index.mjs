@@ -38,7 +38,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { resolveParams, describeParams, forkModeOf } from './src/params.mjs'
 import {
-  activeTargets, boundSummary, driverLabel, instanceReplySummary, messageText, renderBranchHint,
+  activeTargets, boundSummary, driverLabel, instanceReplySummary, messageText, renderBranchHint, renderSteerReply,
   renderForkNotice, renderInFlightDigest, renderInstanceReply, renderWorkerReply,
   shortSessionId,
 } from './src/digest.mjs'
@@ -52,6 +52,15 @@ import { createLineage } from './src/lineage.mjs'
  * "是那条 worktree 的指令"，与 digest 的 `digestAssistantChars` 同一量级。
  */
 const TRIGGER_MAX_CHARS = 120
+
+/**
+ * `fork_steer(block:true)` 的**硬顶**（毫秒）。
+ *
+ * 两个身份：① 工具声明里的 `timeoutMs`（官方 `dsh-tool-call-timeout-policy` 据此强制中止）；
+ * ② 参数 `forkSteerBlockTimeoutMs` 的上限 —— 我们自己的计时器必须**早于**策略中止触发，
+ * 才能返回"还没回，它可能还在跑"这种可读结果，而不是被半路掐断。
+ */
+const STEER_BLOCK_CEILING_MS = 660_000
 
 /** Cordis 插件名。 */
 export const name = 'dsh-autofork'
@@ -1890,6 +1899,65 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 一条消息是否**还在**目标的 inbox 里等着（= 还没有任何 step 把它吃掉）。
+   *
+   * 读取面与手动分叉的动作路由同一处（官方 `Inbox` 的两个待处理表）；消息被吃掉后会从
+   * 这两个表里消失——那正是"它读到了"的信号。
+   * @param {any} target 目标 agent。
+   * @param {string} messageId 我们刚投递的那条消息 id。
+   * @returns {boolean} 仍在待处理表里为 true。
+   */
+  function stillPending(target, messageId) {
+    const pending = [...(target.inbox?.nextTurn ?? []), ...(target.inbox?.nextStep ?? [])]
+    return pending.some(message => message?.id === messageId)
+  }
+
+  /**
+   * 等目标把这条消息吃掉、并且它那一轮跑完。返回 `'reply' | 'timeout' | 'aborted'`。
+   *
+   * 为什么不能"等第一声 idle"：目标正忙时，它可能**先**结束当前那一轮才轮到读我们的消息
+   * （此刻消息还在 next-step 里）——那种 idle 不是答复。所以每一轮 idle 都要复查
+   * `stillPending`。loop 在 turn 结束时会带着待处理消息开下一轮，所以"永远等不到"不会发生；
+   * 真发生了也有超时兜住。
+   *
+   * 两个出口都必须有：`timeoutMs`（对方在跑长活）与 `signal`（调用方中止 / 工具超时策略）。
+   * 官方对会阻塞的工具要求观察 `exec.signal` 并只在自有工作静默后 settle，这里两者都接。
+   * @param {any} target 目标 agent。
+   * @param {string} messageId 我们刚投递的那条消息 id。
+   * @param {{timeoutMs: number, signal?: AbortSignal}} options 预算与调用方信号。
+   * @returns {Promise<'reply' | 'timeout' | 'aborted'>} 等待结果。
+   */
+  function waitForReply(target, messageId, { timeoutMs, signal }) {
+    return new Promise(resolve => {
+      let settled = false
+      let timer
+      let off = () => {}
+      const finish = outcome => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        // `ctx.on` 在真实 cordis 里返回退订函数；极简组合/测试桩可能返回 undefined，
+        // 所以这里必须判一下类型（否则等待结束的那一刻自己抛，把工具调用打成失败）。
+        if (typeof off === 'function') off()
+        signal?.removeEventListener?.('abort', onAbort)
+        resolve(outcome)
+      }
+      const onAbort = () => finish('aborted')
+      timer = setTimeout(() => finish('timeout'), timeoutMs)
+      off = ctx.on('agent/status', ({ agent, status }) => {
+        if (status !== 'idle' || agent?.id !== target.id) return
+        if (stillPending(target, messageId)) {
+          debug('steer.still-pending', { target: target.id, messageId })
+          return
+        }
+        finish('reply')
+      })
+      if (signal?.aborted === true) finish('aborted')
+      else signal?.addEventListener?.('abort', onAbort, { once: true })
+    })
+  }
+
   /* ------------------------------ 分叉调度工具 ------------------------------ */
 
   // 工具面是可选能力：`tools` 服务缺席时（极简组合）不注册，核心分叉照常工作。
@@ -1903,15 +1971,54 @@ export function apply(ctx, config) {
         await settleLineage()
         return relatedSessions(callerId)
       },
-      steer: async (callerId, targetId, text) => {
+      steerCeilingMs: STEER_BLOCK_CEILING_MS,
+      steer: async (callerId, targetId, text, options) => {
         await settleLineage()
         if (!isFamilyMember(callerId, targetId)) {
           return { ok: false, detail: `"${targetId}" 不在你的家族里；先用 fork_list 查看。` }
         }
         const target = ctx.agents.get(targetId)
         if (target === undefined) return { ok: false, detail: `会话 "${targetId}" 已不在运行。` }
-        target.steer(contextMessage(text, `来自 ${callerId} 的中途指令`))
-        return { ok: true, detail: `已向 "${targetId}" 发送中途指令；它会在当前 step 结束后读到。` }
+        const message = contextMessage(text, `来自 ${callerId} 的中途指令`)
+        target.steer(message)
+        const delivered = `已向 "${targetId}" 投递；它会在当前 step 结束后读到。`
+
+        if (options?.block !== true) {
+          return {
+            ok: true,
+            detail: delivered
+              + '**它不会自动回复你** —— 要答复就用 block:true 等它这一轮跑完，或稍后 fork_list 看进展。',
+          }
+        }
+
+        // 阻塞：等它把这条消息吃掉、并且那一轮跑完，再把它的最后一条回复作为结果返回。
+        // 上限取参数与硬顶的较小者（硬顶 = 工具声明的 timeoutMs，官方策略据此中止）。
+        // 下限 50ms 只是防呆（0/负数会退化成"立刻超时"）；上限与工具声明的 timeoutMs 一致。
+        const timeoutMs = Math.max(50, Math.min(
+          Number(params.forkSteerBlockTimeoutMs) || STEER_BLOCK_CEILING_MS, STEER_BLOCK_CEILING_MS,
+        ))
+        const outcome = await waitForReply(target, message.id, { timeoutMs, signal: options?.signal })
+        if (outcome === 'aborted') {
+          return {
+            ok: false,
+            detail: delivered + '但**等待被中断**（调用方中止或工具超时）；它仍会读到这条消息。',
+          }
+        }
+        if (outcome === 'timeout') {
+          return {
+            ok: true,
+            detail: delivered + `等了 ${String(Math.round(timeoutMs / 1000))} 秒它这一轮还没结束`
+              + '（可能还在跑长任务）。用 fork_list 看进展，或稍后再问它一次。',
+          }
+        }
+        const { reply, stepCount } = lastTurnReply(target)
+        debug('steer.replied', { target: target.id, chars: reply.length, stepCount })
+        return {
+          ok: true,
+          detail: renderSteerReply({
+            targetId, reply, stepCount, maxChars: params.reInjectMaxChars,
+          }),
+        }
       },
       cancel: async (callerId, targetId, keepInbox) => {
         await settleLineage()

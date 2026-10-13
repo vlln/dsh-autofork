@@ -462,6 +462,26 @@ export function renderBranchHint({ headId }) {
  * @param {number} input.maxChars 字符上限。
  * @returns {string} 追加文本。
  */
+/**
+ * `fork_steer`（`block:true`）等到的答复：**工具结果**里的措辞（第三人称，不是"我"）。
+ *
+ * 与 `renderWorkerReply` 的区别只在人称：那条是注入给 head 的"后台会话对我说话"，
+ * 这条是调用方拿到的"它回了我什么"。回复本身按 `reInjectMaxChars` 截断（同一套预算）。
+ * @param {object} input 渲染输入。
+ * @param {string} input.targetId 被 steer 的那条会话 id。
+ * @param {string} input.reply 对方这一轮的最后一条文本回复（可为空）。
+ * @param {number} input.stepCount 对方这一轮跑了几步（没有文本回复时用来交代它并非没动）。
+ * @param {number} input.maxChars 回复正文的字符上限。
+ * @returns {string} 工具结果正文。
+ */
+export function renderSteerReply({ targetId, reply, stepCount, maxChars }) {
+  const body = truncate(oneline(reply ?? ''), maxChars)
+  const head = `「${targetId}」这一轮跑完了`
+  return body === ''
+    ? `${head}，但没有产出文本回复（走了 ${String(stepCount)} 步）。`
+    : `${head}，它的最后一条回复：\n${body}`
+}
+
 export function renderInstanceReply({ instanceId, reply, maxChars }) {
   const body = truncate(oneline(reply ?? ''), maxChars)
   const header = `[${driverLabel(instanceId)}] 这是它对你刚才那条指令的回复。`

@@ -15,8 +15,15 @@
  *
  * 于是工具语义是：
  *  - `fork_list`  → 列出**我家族里的会话**（承接来的 upstream + 接管了我的 downstream）
- *  - `fork_steer` → 给家族里某条会话发中途指令
+ *  - `fork_steer` → 给家族里某条会话发一条消息（`block:true` 时等它那一轮跑完并拿到它的回复）
  *  - `fork_cancel`→ 中止家族里某条会话
+ *
+ * ## 通信方向（2026-10 用户实测补的护栏）
+ *
+ * 家族里**只有 `fork_steer` 是显式通道**：一个会话在自己的转写里写普通回复，对方**看不到**。
+ * 另有一条自动通道但**单向**：后台会话（origin）那一轮跑完，会把最后一条回复自动投给接手
+ * 它的会话；反向没有。这三句话必须留在工具描述里——真实误判正是"head 以为自己的普通回复
+ * 已经回给了 origin"（详见 `renderForkNotice` / `renderBranchHint` 的同款说明）。
  *
  * 设计约束：
  *  - `defineTool` 由 index.mjs 注入，本模块**不 import 任何 `@deepseek-ai/*`**，
@@ -117,11 +124,13 @@ export function renderResult(_args, value) {
  * @param {object} deps 依赖注入。
  * @param {(spec: unknown) => unknown} deps.defineTool `@deepseek-ai/dsh-tools` 的 defineTool。
  * @param {(callerId: string) => Array<Record<string, unknown>>} deps.related 列出该会话家族里的其它会话。
- * @param {(callerId: string, targetId: string, text: string) => {ok: boolean, detail: string}} deps.steer 给家族会话发中途指令。
+ * @param {(callerId: string, targetId: string, text: string, options: {block?: boolean, signal?: AbortSignal}) => Promise<{ok: boolean, detail: string}>} deps.steer 给家族会话发消息（`block` 时等它回复）。
+ * @param {number} [deps.steerCeilingMs] 阻塞等待的**硬顶**（工具声明的 `timeoutMs`，与官方
+ *   工具调用超时策略配合；实现必须观察 `exec.signal` 才能声明它）。
  * @param {(callerId: string, targetId: string, keepInbox: boolean) => {ok: boolean, detail: string}} deps.cancel 中止家族会话。
  * @returns {unknown[]} 工具定义数组，交给 `ctx.tools.register`。
  */
-export function createBranchTools({ defineTool, related, steer, cancel }) {
+export function createBranchTools({ defineTool, related, steer, cancel, steerCeilingMs }) {
   /**
    * 解析调用者身份；无 agent 的调用一律拒绝（授权边界）。
    * @param {any} exec 工具运行上下文。
@@ -177,17 +186,28 @@ export function createBranchTools({ defineTool, related, steer, cancel }) {
         + '另一条自动通道是单向的 —— 后台会话（origin）跑完会把最后一条回复自动投给接手它的会话，'
         + '反向不会。'
         + '\n\n本工具**一发即走，没有回执**：返回只表示"已投递"，不表示对方读到或照办。'
-        + '要它的答复，用 `block:true` 等它那一轮跑完（它的最后一条回复会作为结果返回），'
-        + '或者稍后 `fork_list` 看进展。',
+        + '要它的答复，用 `block:true`：本工具会**等它那一轮跑完**，并把它的最后一条回复作为'
+        + '结果返回（有超时上限，超时只表示"还没回"）；也可以稍后 `fork_list` 看进展。',
       parameters: {
         sessionId: { type: 'string', required: true, description: TARGET_DESC },
-        text: { type: 'string', required: true, description: '要传达给它的指令正文。' },
+        text: { type: 'string', required: true, description: '要传达给它的消息正文。' },
+        block: {
+          type: 'boolean',
+          description: 'true 时**等对方那一轮跑完**，把它的最后一条回复作为本次工具结果返回；'
+            + '缺省 false（投递完立即返回，不等）。等待有超时上限，超时只表示"还没回"、不代表投递失败。',
+        },
       },
       output: { schema: RESULT_SCHEMA, render: renderResult },
+      // 声明合作式工具调用预算：`block:true` 会阻塞本工具，必须让官方的超时策略能兜住，
+      // 并且实现要观察 `exec.signal`（本工具的 steer 依赖把 signal 传下去并据此提前 settle）。
+      ...(typeof steerCeilingMs === 'number' ? { timeoutMs: steerCeilingMs } : {}),
       async execute(args, exec) {
         const caller = callerOf(exec)
         if (caller === undefined) return denied
-        return steer(caller, String(args?.sessionId ?? ''), String(args?.text ?? ''))
+        return steer(caller, String(args?.sessionId ?? ''), String(args?.text ?? ''), {
+          block: args?.block === true,
+          signal: exec?.signal,
+        })
       },
     }),
 

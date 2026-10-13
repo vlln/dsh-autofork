@@ -10,6 +10,7 @@ import {
   truncate, oneline, partText, safeJson, renderEventLines, assembleWithinBudget,
   renderForkNotice, renderInFlightDigest, renderWorkerReply, renderBranchHint, activeTargets,
   boundSummary, CONTEXT_SUMMARY_MAX_CHARS, shortSessionId, instanceReplySummary, renderInstanceReply,
+  renderSteerReply,
 } from '../src/digest.mjs'
 import { DEFAULT_PARAMS, resolveParams, describeParams } from '../src/params.mjs'
 
@@ -417,4 +418,16 @@ test('注入文案必须写明"通信方向不对称"（用户 2026-10 指出的
   const hint = renderBranchHint({ headId: 'b' })
   assert.match(hint, /通信方向是不对称的/, 'worker 侧也要讲同一件事')
   assert.match(hint, /不会自动传给你/)
+})
+
+test('renderSteerReply：第三人称、带边界、没产出文本回复时交代步数', () => {
+  const ok = renderSteerReply({ targetId: 'session-b', reply: '已按你的范围实施。', stepCount: 3, maxChars: 100 })
+  assert.match(ok, /^「session-b」这一轮跑完了，它的最后一条回复：/)
+  assert.match(ok, /已按你的范围实施。/)
+
+  const empty = renderSteerReply({ targetId: 'session-b', reply: '   ', stepCount: 4, maxChars: 100 })
+  assert.match(empty, /没有产出文本回复（走了 4 步）/)
+
+  const long = renderSteerReply({ targetId: 'session-b', reply: 'x'.repeat(500), stepCount: 1, maxChars: 40 })
+  assert.ok(long.length < 140, '回复正文按 maxChars 有界：' + String(long.length))
 })

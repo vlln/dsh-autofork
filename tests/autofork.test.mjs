@@ -176,7 +176,12 @@ function harness(options = {}) {
     status: options.parentStatus ?? 'running',
     ctx: { tag: 'parent-ctx' },
     inbox: parentInbox,
-    steer: (message) => calls.steers.push(message),
+    // `steer` 必须把消息放进真实读取面（`nextTurn`/`nextStep`）：`fork_steer(block:true)`
+    // 就是按"消息还在不在这两个表里"判断对方是否已经读到它。
+    steer: (message) => {
+      calls.steers.push(message)
+      parentInbox.nextStep.push(message)
+    },
     inject: (message) => calls.injections.push({ agent: 'session-parent', message }),
     followup: (message) => calls.followups.push({ agent: 'session-parent', message }),
     cancel: (cause, opts) => calls.cancels.push({ cause, opts }),
@@ -189,6 +194,14 @@ function harness(options = {}) {
     on(event, handler) {
       if (!listeners.has(event)) listeners.set(event, [])
       listeners.get(event).push(handler)
+      // 真实 cordis 的 `ctx.on` **返回退订函数**（官方 `dsh-agent-loop` 就这么用）。桩必须
+      // 照抄：`fork_steer(block:true)` 的等待逻辑要在 settle 时摘掉临时监听，桩不返回会让
+      // 那条路径在测试里静默失真。
+      return () => {
+        const list = listeners.get(event) ?? []
+        const index = list.indexOf(handler)
+        if (index >= 0) list.splice(index, 1)
+      }
     },
     // 嵌套子插件：桩里让 webServer 立即可用，从而走真实的探针装载路径。
     inject(deps, callback) {
@@ -233,12 +246,24 @@ function harness(options = {}) {
               listeners.get(`child:${event}`).push(handler)
             },
           },
+          inbox: {
+            nextTurn: [],
+            nextStep: [],
+            remove(id) {
+              this.nextTurn = this.nextTurn.filter(message => message?.id !== id)
+              this.nextStep = this.nextStep.filter(message => message?.id !== id)
+              return true
+            },
+          },
           inject: (message) => calls.injections.push({ agent: opts.sessionId, message }),
           followup: (message) => calls.followups.push({ agent: opts.sessionId, message }),
           // `send(msg, target, wakeup)`：进 next-turn 但不唤醒那条路（客户端只对 next-turn 的
           // 认领判 `waking`，所以 relay 消息必须走它）——夹具照抄真实签名。
           send: (message, target, wakeup) => calls.send.push({ agent: opts.sessionId, message, target, wakeup }),
-          steer: (message) => calls.steers.push({ branch: opts.sessionId, message }),
+          steer: (message) => {
+            calls.steers.push({ branch: opts.sessionId, message })
+            child.inbox.nextStep.push(message)
+          },
           cancel: (cause, o) => calls.cancels.push({ branch: opts.sessionId, cause, opts: o }),
         }
         createdAgents.set(opts.sessionId, child)
@@ -2276,4 +2301,105 @@ test('回传永不直接落盘：protected first row 的风险随 append 路径�
   const woke = calls.followups.filter(entry => entry.agent === headId
     && entry.message.source.autofork === 'reply')
   assert.equal(woke.length, 1, '走 followup：由 loop 在 turn 里落盘（system/message 之后）')
+})
+
+/**
+ * 造一个"已经分叉完成"的家族，供 `fork_steer(block:true)` 的测试驱动。
+ *
+ * 回复文本必须来自**最后一个 turn/start**（`lastTurnReply` 就是这么找的），所以这里把夹具里
+ * 在飞那一轮的 assistant 消息补上文本 —— 否则测到的是"它没有产出文本回复"那条分支。
+ * @param {object} [config] 插件配置覆盖。
+ * @returns {Promise<any>} 桩上下文、head agent、目标（worker）与工具面。
+ */
+async function forkedFamily(config) {
+  const events = sessionLog().map(event => (event.seq === 10
+    ? {
+      ...event,
+      data: {
+        ...event.data,
+        message: {
+          ...event.data.message,
+          content: [
+            { type: 'text', text: '我这一轮的结论：只改了 a.ts，未提交。' },
+            ...event.data.message.content,
+          ],
+        },
+      },
+    }
+    : event))
+  const stub = harness({ events })
+  applyChain(stub.ctx, { forkSteerBlockTimeoutMs: 5000, ...(config ?? {}) })
+  stub.emitInsert(userMessage())
+  await flush()
+  const headId = stub.calls.agentsCreate[0].sessionId
+  const head = stub.createdAgents.get(headId)
+  const tool = stub.calls.registeredTools.find(candidate => candidate.name === 'fork_steer')
+  return { ...stub, headId, head, tool }
+}
+
+/** 触发一次"目标转 idle"。 */
+function idle(stub, agent) {
+  for (const handler of stub.listeners.get('agent/status') ?? []) handler({ agent, status: 'idle' })
+}
+
+test('fork_steer(block:true)：等到对方那一轮跑完，把它的最后一条回复作为结果返回', async () => {
+  const stub = await forkedFamily()
+  const { calls, parent, tool, head } = stub
+  const pending = tool.execute(
+    { sessionId: 'session-parent', text: '请确认你改了什么', block: true },
+    { agent: head, signal: new AbortController().signal },
+  )
+  await flush()
+  assert.equal(calls.steers.length, 1, '先投递（不等）')
+
+  // 对方当时正忙：它先结束了**当前**那一轮才轮到读我们的消息 —— 这一声 idle 不算答复。
+  idle(stub, parent)
+  assert.equal(await Promise.race([pending.then(() => 'settled'), Promise.resolve('waiting')]), 'waiting',
+    '消息还没被吃掉时的 idle 不能当成答复')
+
+  // 它读到了（消息离开待处理表）并跑完这一轮 ⇒ 这才是答复。
+  parent.inbox.nextStep.length = 0
+  idle(stub, parent)
+  const result = await pending
+  assert.equal(result.ok, true)
+  assert.match(result.detail, /这一轮跑完了/)
+  assert.match(result.detail, /只改了 a\.ts/, '必须把对方的最后一条回复带回来')
+})
+
+test('fork_steer(block:true) 超时：消息算已投递，结果明说"还没回"', async () => {
+  const stub = await forkedFamily({ forkSteerBlockTimeoutMs: 60 })
+  const { tool, head, calls } = stub
+  const result = await tool.execute(
+    { sessionId: 'session-parent', text: '请批准', block: true },
+    { agent: head, signal: new AbortController().signal },
+  )
+  assert.equal(calls.steers.length, 1, '超时也要先把消息投出去')
+  assert.equal(result.ok, true, '超时不是投递失败')
+  assert.match(result.detail, /还没结束|看进展/, '要告诉模型"它还在跑"以及下一步怎么办')
+})
+
+test('fork_steer(block:true)：调用方被中止 → 立刻返回"等待被中断"，不留悬挂等待', async () => {
+  const stub = await forkedFamily()
+  const { tool, head } = stub
+  const controller = new AbortController()
+  const pending = tool.execute(
+    { sessionId: 'session-parent', text: '请批准', block: true },
+    { agent: head, signal: controller.signal },
+  )
+  await flush()
+  controller.abort()
+  const result = await pending
+  assert.equal(result.ok, false)
+  assert.match(result.detail, /等待被中断/)
+})
+
+test('fork_steer 默认不阻塞：立刻返回，并明说"它不会自动回复你"', async () => {
+  const stub = await forkedFamily()
+  const { tool, head } = stub
+  const result = await tool.execute(
+    { sessionId: 'session-parent', text: '改方向' },
+    { agent: head, signal: new AbortController().signal },
+  )
+  assert.equal(result.ok, true)
+  assert.match(result.detail, /不会自动回复你/, '必须点明没有回执这件事')
 })

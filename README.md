@@ -124,6 +124,7 @@ agent 自己会用到的三个工具（`exposeDispatchTools: false` 可关掉）
 | `mirrorDelivery` | `'safe'` | 实例回复的投递方式：`'safe'` 避开悬空 `tool_calls`（必要时延到下一个 step 起点）；`'immediate'` 直接 append（**已知会写坏容器转写**，仅作对照） |
 | `noticeSummaries` | `true` | 注入消息是否声明 `form:'notice'`——客户端把它**折叠成一行摘要**（可展开），不折叠则整块显示 |
 | `exposeDispatchTools` | `true` | 是否向前台暴露 `fork_list` / `fork_steer` / `fork_cancel` |
+| `forkSteerBlockTimeoutMs` | `600000` | `fork_steer(block:true)` 最多等对方多久（毫秒）。超时不是失败：消息已投递，结果文本会说明"还没回"，让调用方改用 `fork_list` 看进展 |
 | `debugLogPath` | `''` | 决策日志路径（逐行 JSON）；空表示关闭，可用环境变量 `DSH_AUTOFORK_DEBUG` 兜底 |
 
 渲染预算不足时，digest **显式标注丢弃量**（`因字符预算未渲染` / `更早的 N 个事件`），不做静默截断。

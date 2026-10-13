@@ -282,6 +282,19 @@ export const DEFAULT_PARAMS = {
   /** 是否向前台 agent 暴露 fork_list / fork_steer / fork_cancel 三个调度工具。 */
   exposeDispatchTools: true,
 
+  /**
+   * `fork_steer` 的 `block:true` 最多等多久（毫秒）。
+   *
+   * `fork_steer` 默认一发即走；`block:true` 时它要**等对方那一轮跑完**再把对方的最后一条回复
+   * 作为工具结果返回。等多久必须有上限——否则对方在跑一个长任务时，调用方那一轮会一直挂着。
+   * 超时不是失败：消息已经投递，结果文本会说明"还在跑"，让调用方改用 `fork_list` 看进展。
+   *
+   * 上限另有一条硬顶（工具声明的 `timeoutMs`，见 index.mjs），所以即使这里配得很大，
+   * 官方的工具调用超时策略仍会兜住。下限 50ms 只是防呆。
+   */
+  forkSteerBlockTimeoutMs: 600_000,
+
+
   // ---- 诊断 ----
   /**
    * 决策日志路径；空字符串表示关闭。

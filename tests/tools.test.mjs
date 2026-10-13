@@ -208,3 +208,32 @@ test('fork_steer / fork_list 的描述必须讲清通道语义与"无回执"', (
   assert.match(steer.description, /没有回执/)
   assert.match(list.description, /查看入口/, 'fork_list 要说明自己是"看进展"的地方')
 })
+
+test('fork_steer 的 block 与 exec.signal 必须透传给依赖，并声明合作式超时预算', async () => {
+  // 阻塞语义落在宿主侧（index.mjs）的依赖实现里，工具层只负责把三者原样传下去：
+  // `block`（要不要等）、`signal`（调用方中止时立刻 settle）、以及 `timeoutMs` 元数据
+  // （官方 `dsh-tool-call-timeout-policy` 据此强制；声明它 == 承诺观察 exec.signal）。
+  const seen = []
+  const tools = createBranchTools({
+    defineTool: spec => spec,
+    related: () => [],
+    steer: (caller, target, text, options) => {
+      seen.push({ caller, target, text, options })
+      return { ok: true, detail: 'x' }
+    },
+    cancel: () => ({ ok: true, detail: '' }),
+    steerCeilingMs: 660_000,
+  })
+  const tool = tools.find(candidate => candidate.name === 'fork_steer')
+  const controller = new AbortController()
+
+  await tool.execute({ sessionId: 'session-b', text: 'hi' }, { agent: { id: 'me' }, signal: controller.signal })
+  assert.equal(seen[0].options.block, false, '缺省不阻塞')
+  assert.equal(seen[0].options.signal, controller.signal, 'signal 必须原样传下去')
+
+  await tool.execute({ sessionId: 'session-b', text: 'hi', block: true }, { agent: { id: 'me' }, signal: controller.signal })
+  assert.equal(seen[1].options.block, true)
+
+  assert.equal(tool.timeoutMs, 660_000, '会阻塞的工具必须声明 timeoutMs')
+  assert.match(tool.parameters.block.description, /等对方那一轮跑完/)
+})
