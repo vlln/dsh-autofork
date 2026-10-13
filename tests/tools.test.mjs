@@ -192,3 +192,19 @@ test('家族状态三态互斥：活着但空闲显示"空闲"，不得与"运�
     assert.equal(/已停/.test(row), false, row)
   }
 })
+
+test('fork_steer / fork_list 的描述必须讲清通道语义与"无回执"', () => {
+  const tools = createBranchTools({
+    defineTool: spec => spec,
+    related: () => [],
+    steer: () => ({ ok: true, detail: '' }),
+    cancel: () => ({ ok: true, detail: '' }),
+  })
+  const steer = tools.find(tool => tool.name === 'fork_steer')
+  const list = tools.find(tool => tool.name === 'fork_list')
+  assert.match(steer.description, /唯一的显式通信通道/)
+  assert.match(steer.description, /普通回复不会传到对方/)
+  assert.match(steer.description, /反向不会/)
+  assert.match(steer.description, /没有回执/)
+  assert.match(list.description, /查看入口/, 'fork_list 要说明自己是"看进展"的地方')
+})

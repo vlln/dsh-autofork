@@ -403,3 +403,18 @@ test('三兄弟消息的措辞：说话人是**兄弟会话**（「我」= 兄�
     assert.ok(!text.includes('会话 s'), `${name} 不再重复发送方 id`)
   }
 })
+
+test('注入文案必须写明"通信方向不对称"（用户 2026-10 指出的真实误判）', () => {
+  // 现象：head 把它在这个会话里写的普通回复（"收到""我承接了"）当成已经回给了 origin，
+  // 而机制上**只有 origin → 分叉 这一条自动通道**，反向必须显式调 `fork_steer`。
+  // 根因是没有任何一处文案说明这件事 —— 这三条断言就是那个洞的护栏。
+  const notice = renderForkNotice({ branchId: 'b', siblingId: 's', cwd: '/w', targets: [] })
+  assert.match(notice, /通信方向（不对称，别想当然）/, '通知必须点明方向不对称')
+  assert.match(notice, /反过来没有自动通道/)
+  assert.match(notice, /不会\*\*传给我/, '要明确"你在这里的普通回复不会传给我"')
+  assert.match(notice, /一发即走、\*\*没有回执\*\*/, 'steer 没有回执这件事必须写明')
+
+  const hint = renderBranchHint({ headId: 'b' })
+  assert.match(hint, /通信方向是不对称的/, 'worker 侧也要讲同一件事')
+  assert.match(hint, /不会自动传给你/)
+})

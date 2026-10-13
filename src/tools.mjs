@@ -146,7 +146,9 @@ export function createBranchTools({ defineTool, related, steer, cancel }) {
         + '与 ↓ 接管了你的（在你之后接手用户交互的）。'
         + '分叉发生时会形成一条这样的链，最新的那条是 head —— 也就是你。'
         + '这些会话与你在同一工作目录上并行工作（文件系统没有隔离），'
-        + '在你需要判断"某件事是不是已经有人在做"、或需要给它们下指令时用它。',
+        + '在你需要判断"某件事是不是已经有人在做"、或需要给它们下指令时用它。'
+        + '它也是"对方现在到哪一步了"的查看入口 —— 你发出去的中途指令（`fork_steer`）'
+        + '没有回执，要确认进展只能看这里或让对方显式回你。',
       parameters: {},
       output: {
         schema: {
@@ -168,9 +170,15 @@ export function createBranchTools({ defineTool, related, steer, cancel }) {
 
     defineTool({
       name: 'fork_steer',
-      description: '给你家族里的一条会话发中途指令（等价于对它调用 steer）。'
-        + '它在当前 step 结束后会读到你的指令并据此改变方向，不需要中止它。'
-        + '典型用途：你在 digest 里看到某条后台会话正在做的事已经过时，用它改向。',
+      description: '给你家族里的一条会话发一条消息（等价于对它调用 steer）。'
+        + '它在当前 step 结束后读到你的消息并据此改变方向，不需要中止它。'
+        + '典型用途：你在 digest 里看到某条后台会话正在做的事已经过时，用它改向。'
+        + '\n\n**这是家族里唯一的显式通信通道**：你在这个会话里的普通回复不会传到对方；'
+        + '另一条自动通道是单向的 —— 后台会话（origin）跑完会把最后一条回复自动投给接手它的会话，'
+        + '反向不会。'
+        + '\n\n本工具**一发即走，没有回执**：返回只表示"已投递"，不表示对方读到或照办。'
+        + '要它的答复，用 `block:true` 等它那一轮跑完（它的最后一条回复会作为结果返回），'
+        + '或者稍后 `fork_list` 看进展。',
       parameters: {
         sessionId: { type: 'string', required: true, description: TARGET_DESC },
         text: { type: 'string', required: true, description: '要传达给它的指令正文。' },
