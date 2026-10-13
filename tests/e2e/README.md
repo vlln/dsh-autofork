@@ -122,6 +122,37 @@ append**，就会把 `assistant(tool_calls)` 与它的 `tool/result` 拆开 —�
 ⚠️ mock **不校验**消息顺序，所以这脚本复现的是"**顺序被写坏**"这个事实本身；
 把它变成 400 的是真实 provider。两臂都断言 `mirrorAfterToolResult` 与 `turnEndReason`。
 
+### ④ `fork_steer(block:true)` 真的会等（`steer-block-live.mjs`，**需要真凭据**）
+
+上面三台都用 mock；这一台**用真模型**，因为 `block` 要验的正是"阻塞等待"这件事，而 mock 那台
+在本机接不上（见下）。跑法：
+
+```sh
+E2E_DSH_HOME=/tmp/dsh-autofork-demo E2E_PROFILE=autofork-sdk \
+E2E_MODEL=deepseek-v4.1-flash-expires-on-0910 node steer-block-live.mjs
+```
+
+判据（全部取自**盘上日志**，不靠流）：
+
+1. 某条会话以 `block:true` 调了 `fork_steer`；
+2. 它的 `tool/result` 里带回对方**那一轮的最后一条回复**（不是"还没结束/等待被中断"这类兜底）；
+3. 调用与结果之间**有时间间隔**（真的等了）；
+4. **对方在等待窗口内收到那条"中途指令"**（`call.time ≤ steer.time ≤ result.time`）——
+   这条是最硬的证据：说明调用方确实停在那里等对方把活干完；
+5. 调用者在拿到结果后继续跑。
+
+两个坑（都踩过，脚本已按此写）：
+
+- **不去驱动 head**：SDK 不能 prompt 插件创建的会话（id collision，那一轮静默 error）。`block`
+  是**对称**的，所以让 SDK 建的父会话去阻塞等 head 即可。
+- **不要假设调用者是谁**：父会话忙的时候再发指令会**继续链式分叉**，真正发起调用的可能是
+  新 head。所以判据扫盘上**所有**会话，只认"带 `block:true` 且拿到结果"的那次调用。
+
+⚠️ **mock 台在本机接不上 `deepseek-official`**：provider 背后的 `dsh-llm-deepseek` 是 **Messages
+API 专用**（源码："protocol is not configurable; use a Messages-compatible baseURL"），而官方 mock
+只服务 `/chat/completions`。想让上面三台 mock E2E 也能跑，得在 profile 里配一条 **pi-ai 路由**
+（`api: openai-completions` + `baseURL` 指 mock，pi-ai 的 provider profile 接受 `baseURL`）。
+
 ## 这一层验不到什么
 
 - **浏览器里才暴露的**：焦点是否真的切到了新会话、「分叉」页签是否真的出现在 tab 栏、
