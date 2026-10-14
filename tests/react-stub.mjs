@@ -233,6 +233,8 @@ export async function mountBundle(options = {}) {
         ok: true,
         params: {},
         mode: options.mode ?? 'auto',
+        /** 家族级开关（页签上「自动回注」那个按钮的初值）。 */
+        muted: options.muted === true,
         tools: [],
         nodes: options.nodes ?? [],
         driver: null,

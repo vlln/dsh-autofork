@@ -111,6 +111,9 @@ const HEALTH_PATH = '/api/dsh-autofork/health'
  */
 const FORK_PATH = '/api/dsh-autofork/fork'
 
+/** 家族级动作路由：改"要不要自动回注"（见 `src/lineage.mjs` 的 `families` 表）。 */
+const MUTE_PATH = '/api/dsh-autofork/mute'
+
 /** 动作路由要求的自定义请求头。 */
 const FORK_HEADER = 'x-dsh-autofork'
 
@@ -1333,6 +1336,14 @@ export function apply(ctx, config) {
     const record = {
       headId,
       workerId: session.id,
+      /**
+       * **家族根**（家族级判定的键：自动回注开关按它查、序号也按它计）。
+       *
+       * ⚠️ 曾经记录里没有这个字段——而 `nextBranchOrdinal` 的内存那段按 `record.rootId` 过滤
+       * ⇒ 那一段**一直空转**（只有血缘域那份在起作用，所以单测看不出）。判据钉在真实形状上：
+       * 先有字段，再按它过滤。
+       */
+      rootId: familyRootOf(session.id),
       // **建分叉的时刻**：树里的兄弟顺序按它排（必须稳定，否则每次重启画的树都不一样）。
       // 「分叉」页签也把它当"这次分叉发生在什么时候"显示。
       createdAt: Date.now(),
@@ -1982,9 +1993,21 @@ export function apply(ctx, config) {
     return false
   }
 
+  /** 这个家族是否被关掉了自动回注（默认开；读不到血缘时按"开"处理）。 */
+  function familyMuted(rootId) {
+    return lineage?.familyOf?.(rootId)?.muted === true
+  }
+
   async function reportWorkerReply(worker, record) {
     if (params.reInjectOnTurnEnd !== true) {
       debug('report.disabled', { worker: worker.id })
+      return
+    }
+    // **自动回注的闸门**（家族级）：关掉之后旧会话跑完不再自动投给新会话——但会话照常跑、
+    // 树照常显示、工具（`fork_send` / `fork_list`）照常用。用户 2026-10 定的语义：
+    // 这不是"忘掉/删除"，只是不再自动触发后台通知。
+    if (familyMuted(record.rootId)) {
+      debug('report.muted', { worker: worker.id, root: record.rootId })
       return
     }
     const { reply, stepCount } = lastTurnReply(worker)
@@ -2245,6 +2268,11 @@ export function apply(ctx, config) {
            * ——以服务端为准（不是读设置文档），所以按钮只会出现在宿主真的会按它行事时。
            */
           mode: forkMode(),
+          /**
+           * 当前会话所在家族的**自动回注**开关（页签上那个开关的初值）。家族级而不是会话级：
+           * 回注是"旧会话 → 新会话"这条链上的行为。
+           */
+          muted: sessionId === null ? false : familyMuted(familyRootOf(sessionId)),
           tools: exposedToolNames,
           /**
            * 家族链条（根 → 最新，含本会话自己）：客户端「分叉」页签的数据源。
@@ -2261,6 +2289,51 @@ export function apply(ctx, config) {
       webCtx.effect(() => healthRoute, 'dsh-autofork: health 路由')
     }
 
+    /**
+     * 读一条**动作路由**请求：校验自定义头、只收 POST、读出并解析 JSON 体。
+     *
+     * 两条动作路由（手动分叉 / 自动回注开关）共用这一份：**安全边界与请求形状只能有一个
+     * 实现**（用户 2026-10 的"单一信息"）。缺头、非 POST、体太大、JSON 坏各自回包并返回
+     * `undefined`；正常时返回解析好的请求体。
+     * @param {any} req 请求。
+     * @param {any} res 响应。
+     * @param {(status: number, body: any) => void} json 回包函数。
+     * @param {string} label 日志前缀（`fork` / `mute`）。
+     * @returns {Promise<any|undefined>} 请求体；已在内部回过包时返回 undefined。
+     */
+    async function actionPayload(req, res, json, label) {
+      // 自定义头是安全边界（见 FORK_PATH 注释）：缺它就不是本插件的客户端在说话。
+      if (req?.headers?.[FORK_HEADER] === undefined) {
+        debug(`${label}.request-refused`, { reason: 'missing-header' })
+        json(403, { ok: false, error: 'missing-header' })
+        return undefined
+      }
+      if ((req?.method ?? 'GET') !== 'POST') {
+        json(405, { ok: false, error: 'only POST is supported' })
+        return undefined
+      }
+      let body = ''
+      try {
+        for await (const chunk of req) {
+          body += chunk
+          if (body.length > FORK_BODY_MAX_BYTES) {
+            json(413, { ok: false, error: 'body-too-large' })
+            return undefined
+          }
+        }
+      } catch (error) {
+        debug(`${label}.body-failed`, { error: String(error) })
+        json(400, { ok: false, error: 'body-unreadable' })
+        return undefined
+      }
+      try {
+        return JSON.parse(body === '' ? '{}' : body)
+      } catch {
+        json(400, { ok: false, error: 'invalid-json' })
+        return undefined
+      }
+    }
+
     // 手动分叉的动作路由（契约见 FORK_PATH 的注释）。
     const forkRoute = webCtx.webServer?.register?.({
       kind: 'exact',
@@ -2271,38 +2344,8 @@ export function apply(ctx, config) {
           res.setHeader('content-type', 'application/json')
           res.end(JSON.stringify(body))
         }
-        // 自定义头是安全边界（见 FORK_PATH 注释）：缺它就不是本插件的客户端在说话。
-        if (req?.headers?.[FORK_HEADER] === undefined) {
-          debug('fork.request-refused', { reason: 'missing-header' })
-          json(403, { ok: false, error: 'missing-header' })
-          return
-        }
-        if ((req?.method ?? 'GET') !== 'POST') {
-          json(405, { ok: false, error: 'only POST is supported' })
-          return
-        }
-
-        let body = ''
-        try {
-          for await (const chunk of req) {
-            body += chunk
-            if (body.length > FORK_BODY_MAX_BYTES) {
-              json(413, { ok: false, error: 'body-too-large' })
-              return
-            }
-          }
-        } catch (error) {
-          debug('fork.body-failed', { error: String(error) })
-          json(400, { ok: false, error: 'body-unreadable' })
-          return
-        }
-        let payload
-        try {
-          payload = JSON.parse(body === '' ? '{}' : body)
-        } catch {
-          json(400, { ok: false, error: 'invalid-json' })
-          return
-        }
+        const payload = await actionPayload(req, res, json, 'fork')
+        if (payload === undefined) return
         const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
         const messageId = typeof payload?.messageId === 'string' ? payload.messageId : ''
         if (sessionId === '' || messageId === '') {
@@ -2319,6 +2362,37 @@ export function apply(ctx, config) {
     })
     if (forkRoute !== undefined) {
       webCtx.effect(() => forkRoute, 'dsh-autofork: 手动分叉路由')
+    }
+
+    // 「分叉」页签上的**自动回注开关**（契约见 `src/lineage.mjs` 的 `families` 表）。
+    const muteRoute = webCtx.webServer?.register?.({
+      kind: 'exact',
+      path: MUTE_PATH,
+      handler: async (req, res) => {
+        const json = (status, body) => {
+          res.statusCode = status
+          res.setHeader('content-type', 'application/json')
+          res.end(JSON.stringify(body))
+        }
+        const payload = await actionPayload(req, res, json, 'mute')
+        if (payload === undefined) return
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+        if (sessionId === '' || typeof payload?.muted !== 'boolean') {
+          json(400, { ok: false, error: 'sessionId-and-muted-required' })
+          return
+        }
+        // 家族根这时刻**现取**（别的进程可能刚分叉过；同一份事实一个来源）。
+        await refreshLineage()
+        const rootId = familyRootOf(sessionId)
+        const persisted = await lineage?.setFamilySetting?.(rootId, { muted: payload.muted })
+        debug('mute.request', {
+          sessionId, root: rootId, muted: payload.muted, persisted: persisted === true,
+        })
+        json(200, { ok: true, rootId, muted: payload.muted })
+      },
+    })
+    if (muteRoute !== undefined) {
+      webCtx.effect(() => muteRoute, 'dsh-autofork: 自动回注开关路由')
     }
   }, 'dsh-autofork: health 探针')
 

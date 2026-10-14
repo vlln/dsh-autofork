@@ -46,11 +46,20 @@
 import { z } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 
+/** 家族级设置的形状（`.strict()`：未知字段抛，落盘边界上就被拦）。 */
+const familySettingSchema = z.object({
+  muted: z.boolean(),
+  updatedAt: z.number().int().nonnegative(),
+}).strict()
+
 /** 域与表的名字（必须匹配 `^[a-z][a-z0-9_]*$`：它同时是后端里的文件名段）。 */
 export const LINEAGE_DOMAIN = 'autofork_lineage'
 
 /** 表名。 */
 export const LINEAGE_TABLE = 'edges'
+
+/** 家族级设置的**表名**（键 = 家族根 id）。目前只有一件：要不要自动回注。 */
+export const FAMILY_TABLE = 'families'
 
 /**
  * 域格式版本。改**记录形状**时必须 +1，并把旧版本列进 `compatibleVersions`
@@ -102,7 +111,15 @@ export const lineageDomainSpec = defineDomain({
   version: LINEAGE_VERSION,
   layout: 'per-record',
   invalidRecords: 'backup-and-skip',
-  tables: { [LINEAGE_TABLE]: domainTable(lineageEdgeSchema) },
+  tables: {
+    [LINEAGE_TABLE]: domainTable(lineageEdgeSchema),
+    /**
+     * 家族级设置。**只有"要不要自动回注"这一件**：关掉后会话照常跑、树照常显示，
+     * 只是旧会话跑完不再自动把它的最后一条回复投给新会话（用户 2026-10 定：
+     * "即使忘掉它，整个树也存在，只是不再自动触发后台通知"——所以这不是"忘掉/删除"）。
+     */
+    [FAMILY_TABLE]: domainTable(familySettingSchema),
+  },
 })
 
 /**
@@ -146,6 +163,9 @@ export function createLineage(facility, debug) {
   /** 并发合并：同一时刻只跑一次重读（health 轮询 + 工具调用 + 命名前强刷都会调它）。 */
   let refreshing
 
+  /** 家族级设置（键 = rootId）。与边一样：内存索引 + 落盘，重读时并集式重建。 */
+  const families = new Map()
+
   const ready = (async () => {
     if (facility === undefined || typeof facility.open !== 'function') {
       debug('lineage.no-facility')
@@ -153,8 +173,8 @@ export function createLineage(facility, debug) {
     }
     try {
       domain = await facility.open(lineageDomainSpec)
-      for (const [headId, edge] of domain.table(LINEAGE_TABLE).entries()) index(headId, edge)
-      debug('lineage.opened', { edges: edges.size, workers: headsByWorker.size })
+      indexAll()
+      debug('lineage.opened', { edges: edges.size, workers: headsByWorker.size, families: families.size })
       return true
     } catch (error) {
       // 域打不开**不能**影响分叉本体：降级成"只有内存血缘"（等于本次运行内的旧行为）。
@@ -163,8 +183,46 @@ export function createLineage(facility, debug) {
     }
   })()
 
+  /** 把两张表都读进内存索引（`index()` 与 `families.set` 都是并集式：不会抹掉内存里更新的那一条）。 */
+  function indexAll() {
+    for (const [headId, edge] of domain.table(LINEAGE_TABLE).entries()) index(headId, edge)
+    for (const [rootId, setting] of domain.table(FAMILY_TABLE).entries()) families.set(rootId, setting)
+  }
+
   return {
     ready,
+
+    /**
+     * 家族级设置（没写过就是默认值：自动回注**开**）。
+     * @param {string} rootId 家族根会话 id。
+     * @returns {{muted: boolean}} 设置。
+     */
+    familyOf(rootId) {
+      return families.get(rootId) ?? { muted: false }
+    },
+
+    /**
+     * 写一条家族级设置（先写内存再落盘：读取路径立刻可见）。
+     * @param {string} rootId 家族根会话 id。
+     * @param {{muted: boolean}} setting 设置。
+     * @returns {Promise<boolean>} 是否已持久化。
+     */
+    async setFamilySetting(rootId, setting) {
+      const record = { muted: setting.muted === true, updatedAt: Date.now() }
+      families.set(rootId, record)
+      if (domain === undefined || closed) {
+        debug('lineage.family-memory-only', { root: rootId })
+        return false
+      }
+      try {
+        await domain.table(FAMILY_TABLE).put(rootId, record)
+        debug('lineage.family-wrote', { root: rootId, muted: record.muted })
+        return true
+      } catch (error) {
+        debug('lineage.family-write-failed', { root: rootId, error: String(error) })
+        return false
+      }
+    },
 
     /**
      * **重读持久化层**，把别的进程写的边并进来。
@@ -185,8 +243,8 @@ export function createLineage(facility, debug) {
         try {
           await domain?.close?.()
           domain = await facility.open(lineageDomainSpec)
-          for (const [headId, edge] of domain.table(LINEAGE_TABLE).entries()) index(headId, edge)
-          debug('lineage.refreshed', { edges: edges.size, workers: headsByWorker.size })
+          indexAll()
+          debug('lineage.refreshed', { edges: edges.size, workers: headsByWorker.size, families: families.size })
           return true
         } catch (error) {
           debug('lineage.refresh-failed', { error: String(error) })

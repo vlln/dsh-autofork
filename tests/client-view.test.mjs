@@ -338,3 +338,41 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
 
   view.stop()
 })
+
+test('页签的「自动回注」开关：按家族渲染状态，点一下按同形契约落盘', async () => {
+  // 用户 2026-10：开关放在「分叉」页签里；它改的是**自动回注**（不是关系、不是会话）。
+  /** 在渲染树里按 props 键找元素。 */
+  const findBy = (tree, key) => {
+    let found
+    const walk = (node) => {
+      if (found !== undefined || node === null || typeof node === 'string') return
+      if (Array.isArray(node)) { node.forEach(walk); return }
+      if (node.props?.[key] !== undefined) { found = node; return }
+      walk(node.children)
+    }
+    walk(tree)
+    return found
+  }
+
+  const on = await mountView({ current: 'session-root-000001', nodes: [node({})], muted: false })
+  const button = findBy(on.tree, 'data-mute-toggle')
+  assert.ok(button !== undefined, '页签头部必须有自动回注开关')
+  assert.equal(button.props['data-mute-toggle'], 'on', '默认是开')
+  assert.equal(button.props['aria-pressed'], false)
+  assert.match(on.texts.join('\n'), /自动回注 开/)
+  assert.match(String(button.props.title), /关掉后：会话照常运行、这棵树照常显示/, 'tooltip 要讲清关掉的含义')
+
+  button.props.onClick()
+  const post = on.fetchCalls.find(call => String(call.url).includes('/api/dsh-autofork/mute'))
+  assert.ok(post !== undefined, '点击要打 mute 路由')
+  assert.equal(post.init.method, 'POST')
+  assert.equal(post.init.headers['x-dsh-autofork'], '1', '与分叉路由同一道安全边界')
+  assert.deepEqual(JSON.parse(post.init.body), { sessionId: 'session-root-000001', muted: true })
+
+  const off = await mountView({ current: 'session-root-000001', nodes: [node({})], muted: true })
+  const offButton = findBy(off.tree, 'data-mute-toggle')
+  assert.equal(offButton.props['data-mute-toggle'], 'off')
+  assert.match(off.texts.join('\n'), /自动回注 关/)
+  off.stop()
+  on.stop()
+})
