@@ -1391,7 +1391,7 @@ window.__ModuleLoader__.load({
           background: 'var(--dsw-alias-bg-layer-2, transparent)',
         },
       }, [
-        // ① 头部：标题 + 右侧**保存语义**胶囊（即时生效 / 只读——这是使用者最先想确认的事）
+        // ① 头部：标题（**只在不可写时**右侧出现 `只读` 胶囊——异常态才占版面）
         React.createElement('div', {
           key: 'head',
           style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0' },
@@ -1430,8 +1430,8 @@ window.__ModuleLoader__.load({
           })
         })),
         // 页脚那条（"写进 profile 的 cordis.patch.yml、重启后仍在、没有保存按钮"）**已删**：
-        // 用户 2026-10 判定它是噪声——落盘位置属于**文档**，不该占设置界面的版面；
-        // 界面上只说"即时生效"这一件使用者当下需要知道的事（头部胶囊）。
+        // 用户 2026-10 判定它是噪声——落盘位置属于**文档**，不该占设置界面的版面。
+        // 同一轮里头部那枚"即时生效"胶囊也被删掉（与交互本身重复：点一下就看到选中态变了）。
         // ⑤ 写入被拒：与触发指令的引用块同一种"左侧竖线"记号，错误态也用同一套
         failed ? React.createElement('div', {
           key: 'failed',
