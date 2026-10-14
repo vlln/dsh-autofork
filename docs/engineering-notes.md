@@ -59,7 +59,7 @@ seed、血缘存储）；④ 设计要点与不变量。
 | 血缘 | 写进 DSH 官方存储域（`<DSH_HOME>/storages/autofork_lineage/`），**重启不丢**；工具与页签都读它 |
 | 命名 | 新会话被命名为 `⑂n <家族根名>`（走原生 `sessionTitle.rename`，与手动重命名同一条路） |
 | 界面 | Plugins 页的「分叉方式」设置卡片 + 「分叉」页签（血缘树 + 点击跳转）+ 队列行上的「分叉」按钮 + 三条**助手卡片**（分叉通知 / 在飞摘要 / 后台回注） |
-| 调度 | `fork_list` / `fork_steer` / `fork_cancel` 三个工具 |
+| 调度 | `fork_list` / `fork_send` / `fork_cancel` 三个工具 |
 
 ## 验证
 
@@ -421,7 +421,7 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 - head（B）把自己会话里的普通回复（"收到""我承接了""继续等验收"）当成**已经回给了** origin（A）。
   逐轮核对那份日志：B 自己那半段 18 轮，assistant 正文出现在 A 日志里 **0 轮** —— 那些答复只留在
   B 自己的转写里，机制上永远到不了 A。
-- A 用 `fork_steer` 发"请批准"之后照常继续跑：因为它是**一发即走**的投递（`target.steer(...)`），
+- A 用 `fork_send` 发"请批准"之后照常继续跑：因为它是**一发即走**的投递（`target.steer(...)`），
   没有回执、不建立等待关系；而且 loop 里**没有"等外部消息"这个状态**，turn 一旦开着就一路 step 到结束。
 
 **通道表**（这三条就是必须写进注入文案的东西）：
@@ -430,9 +430,9 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 |---|---|---|
 | A（origin / worker）→ B（head） | **自动**：那一轮跑完，把最后一条回复作为卡片投给 B（`reInjectOnTurnEnd`） | 是 |
 | **B → A** | **没有自动通道** | — |
-| 族内任意两条会话 | **显式**：`fork_steer`（默认一发即走；`block:true` 等对方那一轮结束并把回复带回来） | 是（`steer`） |
+| 族内任意两条会话 | **显式**：`fork_send`（默认一发即走；`block:true` 等对方那一轮结束并把回复带回来） | 是（`steer`） |
 
-**文案护栏**：`renderForkNotice`（发给 head）、`renderBranchHint`（发给 worker）、`fork_steer` 与
+**文案护栏**：`renderForkNotice`（发给 head）、`renderBranchHint`（发给 worker）、`fork_send` 与
 `fork_list` 的描述，四处都点明"反向没有自动通道""你在这里的普通回复不会传过去""steer 没有回执"。
 这三句话比机制本身更重要 —— 缺了它们，模型会自己发明一条不存在的通道。
 
@@ -446,16 +446,30 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 - 官方 `dsh-subagent` 的做法同样是**自己拼前缀**（`Agent ${sender.id} sent a message: `，
   `dsh-subagent/lib/index.js:588`）——宿主不会替插件把 `source` 变成模型可见文字。
 
-所以 `fork_steer` 的正文改成 `分叉会话 <callerId> 发来中途指令：<text>`，与 A→B 那三条回注
+所以 `fork_send` 的正文是 `分叉会话 <callerId> 发来消息：<text>`（0.5.5 起；当时还叫 `fork_steer`），与 A→B 那三条回注
 （`… 发来消息：…`）**共用同一条规则**（`senderPrefixed()`，措辞只写一遍）。没有它，收方的 agent
 不知道该回给谁，多成员家族里只能靠 `fork_list` 猜。
+
+**命名：这条通道不是"上游对下游的控制"**（用户 2026-10 第二轮指出）。两处改名：
+
+| 原来 | 现在 | 为什么 |
+|---|---|---|
+| 工具 `fork_steer` | **`fork_send`** | 族内**任意两条**都能互发、还能 `block:true` 等回复——"steer（操纵）"只描述了单向控制那一种用法 |
+| 参数 `forkSteerBlockTimeoutMs` | **`forkSendBlockTimeoutMs`** | 跟着工具名走（schema 非 strict ⇒ 旧键原样保留但不再读取） |
+
+**并且把它从"折叠通知行"换成我们自己的卡片**：官方 `contextProducer` 对**未识别的 kind 直接把 kind
+当显示名**（`label: kind`），所以老形状在界面上叫 **`plugin:dsh-autofork`**——机器串当名字（用户
+2026-10："这个卡片的名称可能不太恰当"）。插件没有"注册显示名"的钩子，于是唯一能给它人类可读名字的
+途径就是走自己的卡片：标题由 `CARD_TITLES` 给（**`会话消息`**），而且**折叠标题行**上就带发送方
+（`来自 <短 id>`）——steer 的发送方是**会变的**（另外三种卡的发送方恒定，展开后正文里有）。
+真 GUI 实测：折叠行 `会话消息 | 来自 4c660d | 12:00 AM`，展开后 `来自会话 session-…` + 正文。
 
 **`block` 的实现要点**（`waitForReply`）：
 
 - 判"对方读到了"用的是官方 `Inbox` 的两个待处理表（`nextTurn`/`nextStep`），与手动分叉的动作路由
   同一判据。**光有一声 idle 不算答复**：对方正忙时它可能先结束**当前**那一轮才轮到读我们的消息；
   所以每一轮 idle 都要复查 pending，否则会把"还没读到"当答复（测试里专门钉了这条）。
-- 两个出口都必须有：`forkSteerBlockTimeoutMs`（默认 600000，下限 50ms）与 `exec.signal`
+- 两个出口都必须有：`forkSendBlockTimeoutMs`（默认 600000，下限 50ms）与 `exec.signal`
   （调用方中止 / 官方工具超时策略）。工具声明 `timeoutMs`（硬顶 660000）：既是对"会阻塞"的声明，
   也让官方 `dsh-tool-call-timeout-policy` 能兜住；我们自己的计时器恒**早于**它触发，所以超时给出的是
   可读结果（"它还在跑，用 fork_list 看进展"），而不是被半路掐断。
@@ -819,7 +833,7 @@ A ←── 接管 ── B ←── 接管 ── C
 `运行中（正在跑自己的 turn）` / `空闲（可以立刻接话）` / `已结束（agent 已不在）`
 —— 三态互斥（曾经并排打 `[state]` 与 `busy` 两个含义不同的字段，于是出现
 `[running] 已停` 这种自相矛盾的行）。，
-  `fork_steer` / `fork_cancel` 作用于家族成员。
+  `fork_send` / `fork_cancel` 作用于家族成员。
 
 第一版把这个关系读成"父拥有子"，方向是反的——head 调 `fork_list` 返回空，因为它被
 当成"子"而不是"拥有者"（实测："B 无法用 branch-list 工具列出 A"）。修正后与

@@ -81,8 +81,8 @@ dsh plugin --profile web add github:vlln/dsh-autofork
 
 - **自动通道只有一条方向**：后台会话（origin）那一轮跑完，会把**最后一条回复**作为卡片投给接手它的会话。
   **反向没有自动通道。**
-- 因此在任一条会话里写普通回复，**对方看不到**；要跨会话说话只能用 `fork_steer`（族内任意两条会话之间都行）。
-- `fork_steer` 默认一发即走；要等对方答复就用 `block: true`（等它那一轮跑完并把回复带回来）。
+- 因此在任一条会话里写普通回复，**对方看不到**；要跨会话说话只能用 `fork_send`（族内任意两条会话之间都行）。
+- `fork_send` 默认一发即走；要等对方答复就用 `block: true`（等它那一轮跑完并把回复带回来）。
 
 注入给 agent 的文案（分叉通知 / 分叉提示）与工具描述里都写明了这三条 —— 否则 agent 会把自己的普通回复
 当成已经发给了对方（实测踩过：B 以为"收到、我承接了"已经回给了 A，而那条文本只留在 B 自己的转写里）。
@@ -94,7 +94,7 @@ agent 自己会用到的三个工具（`exposeDispatchTools: false` 可关掉）
 | 工具 | 说明 |
 |---|---|
 | `fork_list` | 列出你家族里的其它会话：`↑` 你接管的、`↓` 接管了你的、`~` 同族的另一条分叉。每行带名字与**一个**实时状态（运行中 / 空闲 / 已结束） |
-| `fork_steer` | 给家族里的一条会话发一条消息（等价 steer）：它在当前 step 结束后读到并改向，不必中止。默认**一发即走、没有回执**；`block: true` 时等它**那一轮跑完**，把它的最后一条回复作为本次工具结果返回（上限 `forkSteerBlockTimeoutMs`；超时只表示「还没回」，消息已经投递） |
+| `fork_send` | 给家族里的**任意一条**会话发一条消息（等价 steer）：它在当前 step 结束后读到并改向，不必中止。默认**一发即走、没有回执**；`block: true` 时等它**那一轮跑完**，把它的最后一条回复作为本次工具结果返回（上限 `forkSendBlockTimeoutMs`；超时只表示「还没回」，消息已经投递） |
 | `fork_cancel` | 中止家族里的一条会话（`keepInbox=true` 只中止当前 turn、保留待处理项） |
 
 ## 界面
@@ -135,8 +135,8 @@ agent 自己会用到的三个工具（`exposeDispatchTools: false` 可关掉）
 | `mirrorInstanceReply` | `false` | 是否把实例的回复**反向**追加进容器日志。默认关：方向错了（笔记定的是"旧会话的结果注入回新会话"），那是 `reInjectOnTurnEnd` 干的 |
 | `mirrorDelivery` | `'safe'` | 实例回复的投递方式：`'safe'` 避开悬空 `tool_calls`（必要时延到下一个 step 起点）；`'immediate'` 直接 append（**已知会写坏容器转写**，仅作对照） |
 | `noticeSummaries` | `true` | 注入消息是否声明 `form:'notice'`——客户端把它**折叠成一行摘要**（可展开），不折叠则整块显示 |
-| `exposeDispatchTools` | `true` | 是否向前台暴露 `fork_list` / `fork_steer` / `fork_cancel` |
-| `forkSteerBlockTimeoutMs` | `600000` | `fork_steer(block:true)` 最多等对方多久（毫秒）。超时不是失败：消息已投递，结果文本会说明"还没回"，让调用方改用 `fork_list` 看进展 |
+| `exposeDispatchTools` | `true` | 是否向前台暴露 `fork_list` / `fork_send` / `fork_cancel` |
+| `forkSendBlockTimeoutMs` | `600000` | `fork_send(block:true)` 最多等对方多久（毫秒）。超时不是失败：消息已投递，结果文本会说明"还没回"，让调用方改用 `fork_list` 看进展 |
 | `debugLogPath` | `''` | 决策日志路径（逐行 JSON）；空表示关闭，可用环境变量 `DSH_AUTOFORK_DEBUG` 兜底 |
 
 渲染预算不足时，digest **显式标注丢弃量**（`因字符预算未渲染` / `更早的 N 个事件`），不做静默截断。
