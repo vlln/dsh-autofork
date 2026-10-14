@@ -875,6 +875,58 @@ window.__ModuleLoader__.load({
               overflowWrap: 'anywhere',
             },
           }, label),
+          // **这条会话自己的「自动回注」开关**（0.9.0 起按会话独立）。
+          //
+          // 形态：19×11 的**迷你开关**（轨道 + 圆钮），不是文字药丸 —— 原先写成「回注开」的
+          // 药丸，与状态胶囊、「你在这里」挤在同一行，一排三个 pill（用户 2026-10："太丑了"）。
+          // 开关放在**卡片右上角**：它是一条 per-card 的控制，不是状态；含义写在整卡详情里
+          // （统一 hover 契约：卡内元素都不自带 title），`aria-label` + `aria-checked` 供读屏。
+          React.createElement('span', {
+            key: 'mute',
+            role: 'switch',
+            tabIndex: 0,
+            'data-mute-toggle': node.sessionId,
+            'aria-checked': facts.muted ? 'true' : 'false',
+            'aria-label': '自动回注',
+            onClick: function (event) {
+              if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
+              toggle(!facts.muted)
+            },
+            onKeyDown: function (event) {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              if (typeof event.stopPropagation === 'function') event.stopPropagation()
+              toggle(!facts.muted)
+            },
+            style: {
+              flex: 'none',
+              position: 'relative',
+              width: '19px',
+              height: '11px',
+              marginTop: '5px',
+              borderRadius: '999px',
+              cursor: 'pointer',
+              transition: 'background 120ms ease',
+              background: facts.muted
+                ? 'var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.22))'
+                : TOKEN.accent,
+            },
+          }, React.createElement('span', {
+            key: 'knob',
+            // 稳定锚：测试/排障按它认圆钮（状态从**位置**读，见上面的注释）。
+            'data-mute-knob': '1',
+            style: {
+              position: 'absolute',
+              top: '1.5px',
+              left: facts.muted ? '1.5px' : '9.5px',
+              width: '8px',
+              height: '8px',
+              borderRadius: '999px',
+              background: '#fff',
+              transition: 'left 120ms ease',
+              boxShadow: '0 0 0 0.5px rgba(0, 0, 0, 0.08)',
+            },
+          })),
         ]),
         // 第二行：触发指令（可能是"这次分叉为什么发生"的唯一线索）+ 右对齐的相对时间。
         (trigger !== '' || rel !== '') ? React.createElement('div', {
@@ -905,45 +957,6 @@ window.__ModuleLoader__.load({
         }, [
           showState ? chip('state', meta.text, meta.color, meta.tint) : null,
           isCurrent ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
-          // **这条会话自己的「自动回注」开关**（0.9.0：按会话独立，不再是家族级）。
-          // 语义：它跑完要不要自动把最后一条结果投给它派生出的会话 ⇒ 关掉一条，安静的是它自己。
-          //
-          // ⚠️ 卡根已经是 `role="button"`，所以这里用 `role="switch"` + `stopPropagation`：
-          // 点开关不能顺带把卡片也点了（那是"切会话"）。**不带自己的 title** ——
-          // 整卡只有一个 tooltip 是既有契约，含义写在卡根那句里（见 `detailText`）。
-          React.createElement('span', {
-            key: 'mute',
-            role: 'switch',
-            tabIndex: 0,
-            'data-mute-toggle': node.sessionId,
-            'aria-checked': facts.muted ? 'true' : 'false',
-            'aria-label': '自动回注',
-            onClick: function (event) {
-              if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
-              toggle(!facts.muted)
-            },
-            onKeyDown: function (event) {
-              if (event.key !== 'Enter' && event.key !== ' ') return
-              event.preventDefault()
-              if (typeof event.stopPropagation === 'function') event.stopPropagation()
-              toggle(!facts.muted)
-            },
-            style: {
-              flex: 'none',
-              padding: '0 6px',
-              height: '18px',
-              display: 'flex',
-              alignItems: 'center',
-              borderRadius: '999px',
-              cursor: 'pointer',
-              fontSize: '11px',
-              border: '1px solid ' + (facts.muted
-                ? 'var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.45))'
-                : TOKEN.accent),
-              background: facts.muted ? 'transparent' : 'rgba(11, 107, 203, 0.12)',
-              color: facts.muted ? TOKEN.labelSecondary : TOKEN.accent,
-            },
-          }, facts.muted ? '回注关' : '回注开'),
 
           // 卡只有 176px 宽，所以这里用紧凑写法；完整含义留在 tooltip 上。
           (isDriver && !isCurrent)

@@ -371,8 +371,19 @@ test('每张卡自带「自动回注」开关：按会话渲染、点一下按�
   const offSwitch = switches.find(item => item.props['data-mute-toggle'] === 'session-root-000002')
   assert.equal(onSwitch.props['aria-checked'], 'false', '开着的会话 aria-checked=false（未静音）')
   assert.equal(offSwitch.props['aria-checked'], 'true', '关掉的会话 aria-checked=true')
-  assert.equal(view.texts.includes('回注开'), true)
-  assert.equal(view.texts.includes('回注关'), true)
+  // 形态：**迷你开关**（轨道+圆钮），不是文字药丸 —— 原先那枚「回注开」药丸与状态胶囊、
+  // 「你在这里」挤在同一行，一排三个 pill（用户 2026-10："太丑了"）。
+  assert.equal(view.texts.some(t => /回注/.test(String(t))), false, '卡上不该再有「回注开/关」文字')
+  assert.equal(onSwitch.props['aria-label'], '自动回注', '读屏仍要有名字')
+  // 文字没了 ⇒ 状态必须从**圆钮位置**看得出来：开在右、关在左。
+  const knobLeft = (sw) => {
+    const kids = Array.isArray(sw.children) ? sw.children : [sw.children]
+    const knob = kids.find(kid => kid !== null && typeof kid === 'object'
+      && kid.props?.['data-mute-knob'] !== undefined)
+    return knob?.props?.style?.left
+  }
+  assert.equal(knobLeft(onSwitch), '9.5px', '开着 ⇒ 圆钮在右')
+  assert.equal(knobLeft(offSwitch), '1.5px', '关着 ⇒ 圆钮在左')
   // 整卡只有一个 tooltip 是既有契约 ⇒ 开关**不带**自己的 title，含义写在卡根那句里
   assert.equal(onSwitch.props.title, undefined, '开关不得自带 title')
   const cards = findAll(view.tree, 'data-session-id')
