@@ -37,6 +37,7 @@ import { Session, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { resolveParams, describeParams, forkModeOf } from './src/params.mjs'
+import { nextRefreshInterval } from './src/refresh.mjs'
 import {
   activeTargets, boundSummary, driverLabel, instanceReplySummary, messageText, renderBranchHint, renderSteerReply,
   renderForkNotice, renderInFlightDigest, renderInstanceReply, renderWorkerReply,
@@ -332,10 +333,14 @@ export function apply(ctx, config) {
    * 持久化下来的边（装载是一次表扫描，几个毫秒）。
    * @returns {Promise<boolean>} 是否可用。
    */
-  /** 相邻两次重读的最小间隔（health 每 2s 轮询一次；每次重读 = 一次全表读，别更密）。 */
-  const LINEAGE_REFRESH_MIN_MS = 2000
+  /**
+   * 当前采用的重读间隔（自适应，见 `src/refresh.mjs`）：
+   * 小库维持 2s 保新鲜，重读变贵时自动退避到 30s（domain 句柄不暴露落点路径，
+   * 所以没法用目录 mtime 判断，只能按**实测耗时**调档）。
+   */
+  let refreshIntervalMs
 
-  /** 上次重读的时刻（0 = 还没读过）。 */
+  /** 上次重读的时刻（0 = 还没读过，第一次必须读）。 */
   let lastRefreshAt = 0
 
   /**
@@ -350,9 +355,11 @@ export function apply(ctx, config) {
     // **先等首次装载**（`ready`）：`refresh()` 在域还没 open 时会直接返回 false，不先等就会让
     // 启动后第一次读看到空血缘（这一句以前散在每个调用点，现在收在一处）。
     await settleLineage()
-    if (force !== true && Date.now() - lastRefreshAt < LINEAGE_REFRESH_MIN_MS) return
+    if (force !== true && Date.now() - lastRefreshAt < (refreshIntervalMs ?? 2000)) return
     lastRefreshAt = Date.now()
+    const startedAt = Date.now()
     await lineage.refresh()
+    refreshIntervalMs = nextRefreshInterval(refreshIntervalMs, Date.now() - startedAt)
   }
 
   async function settleLineage() {

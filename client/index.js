@@ -2019,16 +2019,30 @@ window.__ModuleLoader__.load({
        * @returns {string|undefined} 当前会话 id。
        */
       function currentSessionId() {
+        // 唯一的**可达**来源：`sessions.list` 的 `retainedBy.mainView`。
+        //
+        // 曾经想换成"工作区的 selection 存储"，那是错的：`selection` 是
+        // `dsh-client-ui-workspace` 里的**模块级变量**，不在服务面上
+        // （`ctx.get('uiWorkspace')` 的 own keys 只有 `ctx|name|directoryPicker|workspaces|
+        // sessions|connecting`）⇒ 读不到，页签会整个空掉（实测踩过）。
+        //
+        // 那条"引用计数窗口里会选到旧会话"的担心也不成立：工作区 `replaceMain` 里的
+        // `retain(新)` → `selection.set` → `release(旧)` 是**同一个同步块**，而 JS 单线程
+        // ⇒ 外部的异步轮询**观察不到中间态**，稳定的不变量是"**最多一条**会话的
+        // `mainView > 0`"。所以这里只是读它；万一不变量被破（宿主改了实现），
+        // 通过诊断通道报一行 `current.multiple`，而不是自己发明一个猜法。
         var snap = sessions.list.getSnapshot()
         var rows = snap === undefined || snap === null ? undefined : snap.byId
         if (rows === undefined || rows === null) return undefined
         var ids = Object.keys(rows)
+        var visible = []
         for (var index = 0; index < ids.length; index += 1) {
           var row = rows[ids[index]]
           var retained = row === undefined || row === null ? undefined : row.retainedBy
-          if (retained !== undefined && retained !== null && (retained.mainView ?? 0) > 0) return ids[index]
+          if (retained !== undefined && retained !== null && (retained.mainView ?? 0) > 0) visible.push(ids[index])
         }
-        return undefined
+        if (visible.length > 1) postNote('current.multiple: ' + visible.join(','))
+        return visible.length === 0 ? undefined : visible[0]
       }
 
       /**

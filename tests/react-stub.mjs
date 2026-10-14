@@ -265,19 +265,28 @@ export async function mountBundle(options = {}) {
   const services = {
     sessions: {
       list: {
-        getSnapshot: () => ({
-          ids: options.current === undefined ? [] : [options.current],
-          byId: options.current === undefined
-            ? {}
-            : { [options.current]: { id: options.current, retainedBy: { mainView: 1 } } },
-          phase: 'ready',
-          projectionsBySession: {},
-        }),
+        // `options.retainedMain` 与 `options.current` **刻意分开**：真实工作区在
+        // `replaceMain` 里"先 retain(新) 再 release(旧)"，中间那一瞬间两条会话的
+        // `retainedBy.mainView` 都 >0 —— 用它复现"该选哪一条"这个判据（见 client-fork 测试）。
+        getSnapshot: () => {
+          const retained = options.retainedMain ?? (options.current === undefined ? [] : [options.current])
+          return {
+            ids: retained,
+            byId: Object.fromEntries(retained.map(id => [id, { id, retainedBy: { mainView: 1 } }])),
+            phase: 'ready',
+            projectionsBySession: {},
+          }
+        },
       },
       refresh: async () => {},
       refreshProjections: async () => {},
       subagentAddress: () => undefined,
     },
+    /**
+     * ⚠️ **只暴露真实服务面上有的东西**：`dsh-client-ui-workspace` 的 `selection` 是**模块级
+     * 变量**，不在服务对象上（实测页签会空掉）——桩跟着暴露过一次，测试全绿而真机是坏的，
+     * 所以这里刻意不提供它（README 的"判据钉在真实形状上"）。
+     */
     uiWorkspace: { openSession: target => { opened.push(target) } },
     /**
      * `uiConversation`：官方客户端插件用它注册**自己的会话节点种类**（`ui-goal` 的

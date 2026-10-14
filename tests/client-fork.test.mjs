@@ -496,3 +496,24 @@ test('页签：挂稳定视图标记，并藏掉官方共享的左右拖动宽�
     '不能用 `>`：本视图挂在 [data-conversation-scroll] 里面，是共享内容区的孙节点（实测匹配不上）')
   bundle.stop()
 })
+
+test('当前会话：读 `retainedBy.mainView`（唯一可达来源），不变量被破时上报', async () => {
+  // 曾经想改成"工作区的 selection 存储"——那是错的：`selection` 是 workspace 包的**模块级变量**，
+  // 不在服务面上（`ctx.get('uiWorkspace')` 只有 ctx|name|directoryPicker|workspaces|sessions|
+  // connecting）⇒ 真机上页签整个空掉（桩当时跟着暴露了它，所以测试全绿 ✗）。判据钉在真实形状上。
+  const single = await mountBundle({ current: 'session-b' })
+  const pollsOf = bundle => bundle.fetchCalls.map(call => call.url)
+    .filter(url => url.includes('/api/dsh-autofork/health') && url.includes('sessionId='))
+  assert.deepEqual(pollsOf(single).map(url => url.split('sessionId=')[1]), ['session-b'],
+    '只有一条可见时，问的就是它')
+  single.stop()
+
+  // 不变量（"最多一条 mainView > 0"）被破时：照旧回答，但通过诊断通道报一行，
+  // 而不是自己发明一个猜法。
+  const multiple = await mountBundle({ current: 'session-a', retainedMain: ['session-a', 'session-b'] })
+  const urls = multiple.fetchCalls.map(call => call.url)
+  assert.ok(pollsOf(multiple).length > 0, '仍然要轮询（别因为不变量可疑就不工作）')
+  assert.ok(urls.some(url => url.includes('note=current.multiple')),
+    '不变量被破要上报：\n' + urls.filter(u => u.includes('note=')).join('\n'))
+  multiple.stop()
+})
