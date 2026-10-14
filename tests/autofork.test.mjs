@@ -176,7 +176,7 @@ function harness(options = {}) {
     status: options.parentStatus ?? 'running',
     ctx: { tag: 'parent-ctx' },
     inbox: parentInbox,
-    // `steer` 必须把消息放进真实读取面（`nextTurn`/`nextStep`）：`fork_steer(block:true)`
+    // `steer` 必须把消息放进真实读取面（`nextTurn`/`nextStep`）：`fork_send(block:true)`
     // 就是按"消息还在不在这两个表里"判断对方是否已经读到它。
     steer: (message) => {
       calls.steers.push(message)
@@ -195,7 +195,7 @@ function harness(options = {}) {
       if (!listeners.has(event)) listeners.set(event, [])
       listeners.get(event).push(handler)
       // 真实 cordis 的 `ctx.on` **返回退订函数**（官方 `dsh-agent-loop` 就这么用）。桩必须
-      // 照抄：`fork_steer(block:true)` 的等待逻辑要在 settle 时摘掉临时监听，桩不返回会让
+      // 照抄：`fork_send(block:true)` 的等待逻辑要在 settle 时摘掉临时监听，桩不返回会让
       // 那条路径在测试里静默失真。
       return () => {
         const list = listeners.get(event) ?? []
@@ -561,7 +561,7 @@ test('三个调度工具被注册（默认参数）', async () => {
   const { ctx, calls } = harness()
   applyChain(ctx, undefined)
   assert.deepEqual(calls.registeredTools.map(tool => tool.name),
-    ['fork_list', 'fork_steer', 'fork_cancel'])
+    ['fork_list', 'fork_send', 'fork_cancel'])
 })
 
 test('exposeDispatchTools=false 时不注册工具', async () => {
@@ -743,7 +743,7 @@ test('无 webServer 的组合（headless / sdk）也能 apply：核心功能在�
   assert.ok(calls.nestedInject.some(deps => deps.includes('webServer')),
     '探针必须走嵌套 inject 而不是顶层依赖')
   assert.deepEqual(calls.registeredTools.map(tool => tool.name),
-    ['fork_list', 'fork_steer', 'fork_cancel'],
+    ['fork_list', 'fork_send', 'fork_cancel'],
     '核心调度工具在无 webServer 的组合里同样要注册')
 
   // 分叉路径本身照常工作
@@ -1623,7 +1623,7 @@ test('授权：同族的兄弟分叉也可以被 steer（不只有祖先/后代�
   applyChain(ctx, undefined)
   // 让兄弟"活着"：注册一个 agent 桩。
   ctx.agents.create({ sessionId: 'session-head-2', meta: {} })
-  const tool = calls.registeredTools.find(candidate => candidate.name === 'fork_steer')
+  const tool = calls.registeredTools.find(candidate => candidate.name === 'fork_send')
   const ok = await tool.execute({ sessionId: 'session-head-2', text: '改方向' },
     { agent: { id: 'session-head-1' } })
   assert.equal(ok.ok, true, '兄弟分叉应当被放行')
@@ -2304,7 +2304,7 @@ test('回传永不直接落盘：protected first row 的风险随 append 路径�
 })
 
 /**
- * 造一个"已经分叉完成"的家族，供 `fork_steer(block:true)` 的测试驱动。
+ * 造一个"已经分叉完成"的家族，供 `fork_send(block:true)` 的测试驱动。
  *
  * 回复文本必须来自**最后一个 turn/start**（`lastTurnReply` 就是这么找的），所以这里把夹具里
  * 在飞那一轮的 assistant 消息补上文本 —— 否则测到的是"它没有产出文本回复"那条分支。
@@ -2328,12 +2328,12 @@ async function forkedFamily(config) {
     }
     : event))
   const stub = harness({ events })
-  applyChain(stub.ctx, { forkSteerBlockTimeoutMs: 5000, ...(config ?? {}) })
+  applyChain(stub.ctx, { forkSendBlockTimeoutMs: 5000, ...(config ?? {}) })
   stub.emitInsert(userMessage())
   await flush()
   const headId = stub.calls.agentsCreate[0].sessionId
   const head = stub.createdAgents.get(headId)
-  const tool = stub.calls.registeredTools.find(candidate => candidate.name === 'fork_steer')
+  const tool = stub.calls.registeredTools.find(candidate => candidate.name === 'fork_send')
   return { ...stub, headId, head, tool }
 }
 
@@ -2342,7 +2342,7 @@ function idle(stub, agent) {
   for (const handler of stub.listeners.get('agent/status') ?? []) handler({ agent, status: 'idle' })
 }
 
-test('fork_steer(block:true)：等到对方那一轮跑完，把它的最后一条回复作为结果返回', async () => {
+test('fork_send(block:true)：等到对方那一轮跑完，把它的最后一条回复作为结果返回', async () => {
   const stub = await forkedFamily()
   const { calls, parent, tool, head, headId } = stub
   const pending = tool.execute(
@@ -2355,9 +2355,16 @@ test('fork_steer(block:true)：等到对方那一轮跑完，把它的最后一�
   // 模型只看到 content ⇒ 前缀不放正文里，收方 agent 就不知道该回给谁。
   assert.equal(
     calls.steers[0].content[0].text,
-    `分叉会话 ${headId} 发来中途指令：请确认你改了什么`,
+    `分叉会话 ${headId} 发来消息：请确认你改了什么`,
     '正文必须自带发送方（模型只看到 content，看不到 source）',
   )
+  // 并且**走我们自己的卡片形状**：官方对未识别的 kind 直接把 kind 当显示名
+  // （`contextProducer` 的 `label: kind`）⇒ 老形状在界面上叫 `plugin:dsh-autofork`（机器串当
+  // 名字，用户 2026-10 指出"名称不太恰当"）。切成 `agent-message` + `relay` + 本插件标记后，
+  // 标题与发送方都由客户端卡片给。
+  assert.deepEqual(calls.steers[0].source, {
+    kind: 'agent-message', form: 'relay', senderSessionId: headId, autofork: 'steer',
+  }, 'steer 必须以卡片形状投递')
 
   // 对方当时正忙：它先结束了**当前**那一轮才轮到读我们的消息 —— 这一声 idle 不算答复。
   idle(stub, parent)
@@ -2373,8 +2380,8 @@ test('fork_steer(block:true)：等到对方那一轮跑完，把它的最后一�
   assert.match(result.detail, /只改了 a\.ts/, '必须把对方的最后一条回复带回来')
 })
 
-test('fork_steer(block:true) 超时：消息算已投递，结果明说"还没回"', async () => {
-  const stub = await forkedFamily({ forkSteerBlockTimeoutMs: 60 })
+test('fork_send(block:true) 超时：消息算已投递，结果明说"还没回"', async () => {
+  const stub = await forkedFamily({ forkSendBlockTimeoutMs: 60 })
   const { tool, head, calls } = stub
   const result = await tool.execute(
     { sessionId: 'session-parent', text: '请批准', block: true },
@@ -2385,7 +2392,7 @@ test('fork_steer(block:true) 超时：消息算已投递，结果明说"还没�
   assert.match(result.detail, /还没结束|看进展/, '要告诉模型"它还在跑"以及下一步怎么办')
 })
 
-test('fork_steer(block:true)：调用方被中止 → 立刻返回"等待被中断"，不留悬挂等待', async () => {
+test('fork_send(block:true)：调用方被中止 → 立刻返回"等待被中断"，不留悬挂等待', async () => {
   const stub = await forkedFamily()
   const { tool, head } = stub
   const controller = new AbortController()
@@ -2400,7 +2407,7 @@ test('fork_steer(block:true)：调用方被中止 → 立刻返回"等待被中�
   assert.match(result.detail, /等待被中断/)
 })
 
-test('fork_steer 默认不阻塞：立刻返回，并明说"它不会自动回复你"', async () => {
+test('fork_send 默认不阻塞：立刻返回，并明说"它不会自动回复你"', async () => {
   const stub = await forkedFamily()
   const { tool, head } = stub
   const result = await tool.execute(

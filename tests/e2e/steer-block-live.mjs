@@ -1,5 +1,5 @@
 /**
- * E2E（**真模型，需要凭据**）：`fork_steer(block:true)` 真的会**阻塞等待**，并且把对方那一轮
+ * E2E（**真模型，需要凭据**）：`fork_send(block:true)` 真的会**阻塞等待**，并且把对方那一轮
  * 的最后一条回复作为工具结果返回。
  *
  * ## 为什么是"真模型"这一档
@@ -31,7 +31,7 @@
  * 环境变量：`E2E_CWD`（默认 `/tmp/dsh-autofork-e2e-work`）、`E2E_SESSION_ID`、
  * `E2E_PROVIDER`、`E2E_MODEL`、`E2E_PROFILE`、`E2E_FORK_DELAY_MS`（默认 4000）、
  * `E2E_TIMEOUT_MS`（默认 240000）、`E2E_BLOCK_TIMEOUT_MS`（写进插件的
- * `forkSteerBlockTimeoutMs`，默认 180000）。
+ * `forkSendBlockTimeoutMs`，默认 180000）。
  *
  * 退出码：0 = 通过；1 = 没验到（会打印盘上原始证据，便于判断是插件坏了还是模型没照做）。
  */
@@ -89,7 +89,7 @@ const child = spawn('dsh', ['--profile', PROFILE], {
   env: {
     ...process.env,
     DSH_HOME: HOME_DIR,
-    DSH_AUTOFORK_PARAMS: JSON.stringify({ forkSteerBlockTimeoutMs: BLOCK_TIMEOUT_MS }),
+    DSH_AUTOFORK_PARAMS: JSON.stringify({ forkSendBlockTimeoutMs: BLOCK_TIMEOUT_MS }),
   },
   cwd: WORK,
   stdio: ['pipe', 'pipe', 'pipe'],
@@ -160,19 +160,19 @@ log({ step: 'prompt-3（要求 block:true 的中途指令）' })
 await prompt(SESSION_ID,
   '请按顺序做两件事，不要做别的：\n'
   + '1) 调用 fork_list，看家族里每条会话的状态；\n'
-  + '2) 从中挑一条**状态不是"已结束"、且不是你自己**的会话，对它调用 fork_steer：'
+  + '2) 从中挑一条**状态不是"已结束"、且不是你自己**的会话，对它调用 fork_send：'
   + 'sessionId=<它的 id>、text="请用一句话总结你刚才在做什么"、block=true。\n'
   + '它会在对方那一轮跑完后返回对方的最后一条回复。拿到回复后，把回复原文贴出来。'
   + `（刚才分叉出来的那条是 ${head}，若它已结束就换一条。）`)
 
-/** 扫盘上所有会话，找**最新**那次 block:true 的 fork_steer 调用。 */
+/** 扫盘上所有会话，找**最新**那次 block:true 的 fork_send 调用。 */
 function findBlockCall() {
   const found = []
   for (const id of allSessionIds()) {
     let rows
     try { rows = rowsOf(logPathOf(id)) } catch { continue }
     for (const row of rows) {
-      if (row.type !== 'tool/call' || row.data?.name !== 'fork_steer') continue
+      if (row.type !== 'tool/call' || row.data?.name !== 'fork_send') continue
       if (!/"block":\s*true/.test(String(row.data.arguments))) continue
       if ((row.time ?? 0) < runStart) continue
       const result = rows.find(candidate => candidate.type === 'tool/result' && candidate.seq > row.seq
@@ -195,7 +195,7 @@ child.kill()
 
 console.log('\n================ 判据 ================')
 const fail = reason => { console.error(`❌ ${reason}`); if (stderrTail !== '') console.error(stderrTail); process.exit(1) }
-if (hit === null) fail('没有观察到"带 block:true 且拿到结果"的 fork_steer 调用')
+if (hit === null) fail('没有观察到"带 block:true 且拿到结果"的 fork_send 调用')
 
 const { caller, call, result } = hit
 const args = JSON.parse(String(call.data.arguments))
@@ -203,8 +203,11 @@ const resultText = textOf(result)
 const elapsed = Math.round(((result.time ?? 0) - (call.time ?? 0)) / 1000)
 const counterpart = String(args.sessionId)
 const counterpartRows = existsSync(logPathOf(counterpart)) ? rowsOf(logPathOf(counterpart)) : []
+// 对方收到的那条：**新形状是卡片**（`agent-message` + `relay` + `autofork:'steer'`，
+// 0.6.0 起）——老形状是 `form:'notice'` 且 summary 写着「中途指令」，两种都认，便于拿旧构建对照。
 const steerRows = counterpartRows.filter(row => row.type === 'user/message'
-  && JSON.stringify(row.data?.source ?? {}).includes('中途指令'))
+  && (row.data?.source?.autofork === 'steer'
+    || JSON.stringify(row.data?.source ?? {}).includes('中途指令')))
 const steerInside = steerRows.filter(row => (row.time ?? 0) >= (call.time ?? 0) && (row.time ?? 0) <= (result.time ?? 0))
 const afterCaller = hit.rows.filter(row => row.type === 'assistant/message' && row.seq > result.seq).length
 
@@ -213,7 +216,7 @@ console.log(`① 调用参数 block=true ? ${/"block":\s*true/.test(String(call.
 console.log(`② 工具结果带回对方最后一条回复 ? ${/这一轮跑完了/.test(resultText) && /最后一条回复/.test(resultText) ? '✅' : '❌'}`)
 console.log(`   走了兜底分支（超时/被中断）? ${/还没结束|等待被中断/.test(resultText) ? '❌ 是' : '✅ 否'}`)
 console.log(`③ 真的等了（调用→结果 ${elapsed}s）? ${elapsed > 0 ? '✅' : '❌'}`)
-console.log(`④ 对方在等待窗口内收到中途指令 ? ${steerInside.length > 0 ? '✅' : '❌'}（共 ${steerRows.length} 条，窗口内 ${steerInside.length} 条）`)
+console.log(`④ 对方在等待窗口内收到跨会话消息（steer 卡片）? ${steerInside.length > 0 ? '✅' : '❌'}（共 ${steerRows.length} 条，窗口内 ${steerInside.length} 条）`)
 // ⑤ 只是参考：调用者可能在同一个 turn 里就答完了，扫描时刻未必看得到后续 assistant。
 console.log(`⑤（参考）调用者拿到结果后的 assistant 数：${afterCaller}`)
 console.log('\n结果正文：\n' + resultText.slice(0, 400))
@@ -222,6 +225,6 @@ if (!/"block":\s*true/.test(String(call.data.arguments))) fail('调用没有带 
 if (!/这一轮跑完了/.test(resultText) || !/最后一条回复/.test(resultText)) fail('结果里没有带回对方的回复')
 if (/还没结束|等待被中断/.test(resultText)) fail('走了兜底分支（超时/被中断），没验到"等到了"')
 if (!(elapsed > 0)) fail('调用与结果之间没有时间间隔，可疑')
-if (steerInside.length === 0) fail('对方没有在等待窗口内收到中途指令')
+if (steerInside.length === 0) fail('对方没有在等待窗口内收到跨会话消息（steer 卡片）')
 console.log('\n✅ 通过：block:true 真的阻塞等到对方那一轮结束，并把它的最后一条回复作为结果返回。')
 process.exit(0)

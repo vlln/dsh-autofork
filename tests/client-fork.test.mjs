@@ -404,6 +404,26 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
   const header = folded.children[0]
   assert.equal(typeof header.props.onClick, 'function', '头行可点击（折叠/展开）')
   header.props.onClick()  // 桩的 useState 是只读的，展开态由真 GUI 验证（见工程笔记）
+
+  // `steer`（跨会话消息，工具名 `fork_send`）也走卡片——这是**唯一**能给它人类可读名字的途径：
+  // 官方 `contextProducer` 对未识别的 kind 直接 `label: kind`，所以老的 notice 形状在界面上叫
+  // `plugin:dsh-autofork`（用户 2026-10："这个卡片的名称可能不太恰当"）。
+  const steerCard = { type: 'user/message', seq: 8, time: 1_700_000_000_000, data: {
+    id: 'm-steer',
+    content: [{ type: 'text', text: '分叉会话 session-sender 发来消息：请报告进度' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-sender', autofork: 'steer' },
+  } }
+  assert.deepEqual(definition.match(steerCard), { id: 'm-steer', role: 'start' })
+  const steerContext = { key: '8:autofork-messagem-steer', id: 'm-steer', start: { location: { kind: 'unresolved' } }, state: undefined }
+  steerContext.state = definition.start(steerContext, { event: steerCard, id: 'm-steer' }, reader)
+  const steerNode = definition.buildViewNode(steerContext)
+  const steerFolded = bundle.stub.render({ type: entry.component, props: { node: steerNode }, children: [] })
+  const steerText = bundle.stub.texts(steerFolded).join('\n')
+  assert.equal(steerFolded.props[CARD_ATTR_KEY], 'steer', 'steer 卡片带自己的标记')
+  assert.ok(steerText.includes('会话消息'), 'steer 的标题是「会话消息」，不是机器 kind：\n' + steerText)
+  assert.ok(steerText.includes('来自 sender'), '折叠行就带发送方（家族里任意一条都可能发来）：\n' + steerText)
+  assert.match(css, /\[data-part=sender-inline\]/, '折叠行的发送方有样式规则')
+
   bundle.stop()
 })
 

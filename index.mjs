@@ -9,7 +9,7 @@
  *
  * - **head** = 最新的那条，用户面向它；它**接管**了身后的会话。
  * - 被接管的会话继续在后台跑（**绝不中止在飞 turn**），它的最后一条回复流向 head。
- * - head 能看见并管理整条链（`fork_list` / `fork_steer` / `fork_cancel`）。
+ * - head 能看见并管理整条链（`fork_list` / `fork_send` / `fork_cancel`）。
  *
  * 第一版把这个关系读成"父拥有子"，方向反了：head 调 `fork_list` 返回空，因为它被
  * 当成"子"而不是"拥有者"（用户实测："B 无法用 branch-list 工具列出 A"）。
@@ -54,10 +54,10 @@ import { createLineage } from './src/lineage.mjs'
 const TRIGGER_MAX_CHARS = 120
 
 /**
- * `fork_steer(block:true)` 的**硬顶**（毫秒）。
+ * `fork_send(block:true)` 的**硬顶**（毫秒）。
  *
  * 两个身份：① 工具声明里的 `timeoutMs`（官方 `dsh-tool-call-timeout-policy` 据此强制中止）；
- * ② 参数 `forkSteerBlockTimeoutMs` 的上限 —— 我们自己的计时器必须**早于**策略中止触发，
+ * ② 参数 `forkSendBlockTimeoutMs` 的上限 —— 我们自己的计时器必须**早于**策略中止触发，
  * 才能返回"还没回，它可能还在跑"这种可读结果，而不是被半路掐断。
  */
 const STEER_BLOCK_CEILING_MS = 660_000
@@ -1997,9 +1997,12 @@ export function apply(ctx, config) {
         }
         const target = ctx.agents.get(targetId)
         if (target === undefined) return { ok: false, detail: `会话 "${targetId}" 已不在运行。` }
-        // 正文带发送方（与回注那三条同一规则，见 `senderPrefixed`）；`summary` 只管**呈现**，
-        // 折叠行上写的是 `来自 <id> 的中途指令`——人是两面都能看到，模型只有正文。
-        const message = contextMessage(senderPrefixed(callerId, text, '中途指令'), `来自 ${callerId} 的中途指令`)
+        // **走卡片**（与回注那三条同一套：`agent-message` + `relay` + 本插件标记）。
+        // 为什么不用 `contextMessage`（一行折叠通知）：官方 `contextProducer` 对未识别的 kind
+        // 直接把 **kind 当显示名**（`label: kind`），于是那一行在界面上叫 `plugin:dsh-autofork`
+        // ——机器串当名字（用户 2026-10 指出"这个卡片的名称不太恰当"），而插件没有"注册显示名"
+        // 的钩子；切成我们自己的卡片后标题由 `CARD_TITLES` 给（`会话消息`），发送方也能上标题行。
+        const message = agentMessage(callerId, text, 'steer')
         target.steer(message)
         const delivered = `已向 "${targetId}" 投递；它会在当前 step 结束后读到。`
 
@@ -2015,7 +2018,7 @@ export function apply(ctx, config) {
         // 上限取参数与硬顶的较小者（硬顶 = 工具声明的 timeoutMs，官方策略据此中止）。
         // 下限 50ms 只是防呆（0/负数会退化成"立刻超时"）；上限与工具声明的 timeoutMs 一致。
         const timeoutMs = Math.max(50, Math.min(
-          Number(params.forkSteerBlockTimeoutMs) || STEER_BLOCK_CEILING_MS, STEER_BLOCK_CEILING_MS,
+          Number(params.forkSendBlockTimeoutMs) || STEER_BLOCK_CEILING_MS, STEER_BLOCK_CEILING_MS,
         ))
         const outcome = await waitForReply(target, message.id, { timeoutMs, signal: options?.signal })
         if (outcome === 'aborted') {

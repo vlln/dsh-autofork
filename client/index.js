@@ -122,6 +122,9 @@ window.__ModuleLoader__.load({
       notice: '分叉通知',
       digest: '在飞进度',
       reply: '后台会话回复',
+      // `steer`（跨会话消息，工具名 `fork_send`）：家族里**任意两条**都能互发，所以标题用中性的
+      // 「会话消息」，不用"指令/控制"那套词（用户 2026-10：这条通道已经不是上游对下游的控制了）。
+      steer: '会话消息',
     }
 
     /** 回退条容器的 DOM 属性。 */
@@ -1530,6 +1533,10 @@ window.__ModuleLoader__.load({
         '[data-dsh-autofork-card] [data-part=title]{font-size:var(--dsh-content-font-size,14px);flex:none}',
         '[data-dsh-autofork-card] [data-part=time]{color:inherit;font:var(--dsw-font-xxs-12);flex:none;',
         'margin-left:auto}',
+        // 折叠标题行上的发送方（只有 `steer` 用）：比标题低一档、比时间略高一点，
+        // 用 tabular 数字让不同卡的会话短 id 竖直对齐。
+        '[data-dsh-autofork-card] [data-part=sender-inline]{color:var(--dsw-alias-label-caption);',
+        'font:var(--dsw-font-xxs-12);flex:none;font-variant-numeric:tabular-nums}',
         '[data-dsh-autofork-card] [data-part=chevron]{color:inherit;flex:none}',
         '[data-dsh-autofork-card][data-open] [data-part=chevron]{transform:rotate(180deg)}',
         '[data-dsh-autofork-card] [data-part=body]{padding:0 16px 12px 40px}',
@@ -1558,6 +1565,7 @@ window.__ModuleLoader__.load({
       var Icon = primitives.IconPaperPlaneOutlineRegular ?? primitives.IconBranchOutlineRegular
       var Chevron = primitives.IconChevronDownOutlineRegular
       var title = CARD_TITLES[data.marker] ?? '消息'
+      var sender = typeof data.sender === 'string' ? data.sender : ''
       var clock = ''
       try {
         clock = new Date(data.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
@@ -1572,6 +1580,11 @@ window.__ModuleLoader__.load({
       Icon === undefined ? null : React.createElement('span', { 'data-part': 'icon', 'aria-hidden': true },
         React.createElement(Icon, { size: 14 })),
       React.createElement('span', { 'data-part': 'title' }, title),
+      // `steer` 的**发送方是会变的**（家族里任意一条都可能发来），所以折叠行就带出来；另外三种卡
+      // 的发送方恒定（就是分叉出来的那条），展开后正文里有 `来自会话 …`，不必再占标题行。
+      data.marker === 'steer' && sender !== ''
+        ? React.createElement('span', { 'data-part': 'sender-inline' }, '来自 ' + shortId(sender))
+        : null,
       clock === '' ? null : React.createElement('time', { 'data-part': 'time' }, clock),
       Chevron === undefined ? null : React.createElement(Chevron, { 'data-part': 'chevron', size: 12 }))
       var body = open === false ? null : React.createElement('div', { 'data-part': 'body' },
