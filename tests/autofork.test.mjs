@@ -510,12 +510,21 @@ test('running + 长 step + 有已完成 turn → 抢占消息、建分叉、注�
   assert.match(text[0], /\[分叉通知\]/)
   assert.match(text[1], /\[在飞进度\]/)
   for (const [index, message] of cards.entries()) {
-    assert.deepEqual(message.source, {
+    // 只比对**稳定契约**四个字段；`bodyOffset` 这类呈现字段单独断言（见下），
+    // 免得以后加一个呈现字段就要改这里一次。
+    assert.deepEqual({
+      kind: message.source.kind, form: message.source.form,
+      senderSessionId: message.source.senderSessionId, autofork: message.source.autofork,
+    }, {
       kind: 'agent-message',
       form: 'relay',
       senderSessionId: 'session-parent',
       autofork: index === 0 ? 'notice' : 'digest',
     }, 'source 必须是 agent-message + relay + sender + 本插件的种类标记')
+    // 呈现字段：客户端按这个偏移量剥前缀（不解析语法）⇒ 它必须正好是正文里前缀的长度。
+    const bodyText = message.content.map(part => part.text ?? '').join('')
+    assert.equal(typeof message.source.bodyOffset, 'number', '正文前缀长度要随 source 一起给出')
+    assert.match(bodyText.slice(message.source.bodyOffset), /^\[/, '偏移量之后应当直接是正文（不在前缀里）')
   }
   assert.equal(appendedCards(calls, headId).length, 0,
     '绝不能直接落盘：head 还没有自己的 system/message（protected first row）')
@@ -785,7 +794,10 @@ test('被接管的会话（worker）转 idle → 回复投给 head 并**唤醒**
   await flush()
   const woke = calls.followups.slice(followupsBefore).filter(entry => entry.agent === headId)
   assert.equal(woke.length, 1, 'head 空闲时必须唤醒它——卡片到了却不跑模型就是用户报的 bug')
-  assert.deepEqual(woke[0].message.source, {
+  assert.deepEqual({
+    kind: woke[0].message.source.kind, form: woke[0].message.source.form,
+    senderSessionId: woke[0].message.source.senderSessionId, autofork: woke[0].message.source.autofork,
+  }, {
     kind: 'agent-message', form: 'relay', senderSessionId: 'session-parent', autofork: 'reply',
   })
   const text = woke[0].message.content[0].text
@@ -2210,8 +2222,9 @@ test('params：volatile 引用被解引用成当次的值（health / 日志里�
   applyChain(ctx, { forkMode: { get: () => 'manual' } })
   const body = await callHealth(calls.routes, 'sessionId=session-parent')
   assert.equal(body.mode, 'manual', 'health 必须报告当前生效的分叉方式（客户端据此决定要不要挂按钮）')
-  assert.equal(body.params.forkMode, 'manual')
-  assert.equal(typeof body.params.forkMode, 'string')
+  // 单一来源：当前值只在 `mode` 里；`params` 快照**不含** forkMode（免得同一份响应两处口径）。
+  assert.equal(body.mode, 'manual')
+  assert.equal('forkMode' in body.params, false, 'params 快照里不该再有 forkMode')
 })
 
 test('条目 Config：volatile 叶子按 schema 注入，非 volatile 配置**原样保留**（不被校验剥掉）', () => {
@@ -2365,7 +2378,11 @@ test('fork_send(block:true)：等到对方那一轮跑完，把它的最后一�
   // （`contextProducer` 的 `label: kind`）⇒ 老形状在界面上叫 `plugin:dsh-autofork`（机器串当
   // 名字，用户 2026-10 指出"名称不太恰当"）。切成 `agent-message` + `relay` + 本插件标记后，
   // 标题与发送方都由客户端卡片给。
-  assert.deepEqual(calls.steers[0].source, {
+  assert.deepEqual({
+    kind: calls.steers[0].source.kind, form: calls.steers[0].source.form,
+    senderSessionId: calls.steers[0].source.senderSessionId, autofork: calls.steers[0].source.autofork,
+    awaitReply: calls.steers[0].source.awaitReply,
+  }, {
     kind: 'agent-message', form: 'relay', senderSessionId: headId, autofork: 'steer', awaitReply: true,
   }, 'steer 必须以卡片形状投递，并带上"等回复"标记')
 

@@ -171,6 +171,16 @@ export function apply(ctx, config) {
   if (!params.enabled) return
 
   /**
+   * 参数快照的对外形状：**去掉 `forkMode`**（它的当前值只走 health 的 `mode` 字段）。
+   * @param {Record<string, unknown>} all 解析后的参数。
+   * @returns {Record<string, unknown>} 可安全外发的副本。
+   */
+  function withoutForkMode(all) {
+    const { forkMode: _snapshot, ...rest } = all
+    return rest
+  }
+
+  /**
    * 当前生效的分叉方式（每次现取，不缓存——见 `src/params.mjs` 的 `forkModeOf`）。
    * @returns {'auto' | 'manual'} `'auto'` 忙时分叉；`'manual'` 入队等用户点「分叉」。
    */
@@ -281,7 +291,7 @@ export function apply(ctx, config) {
     sessionsApi = capabilityCtx.sessions
   })
 
-  ctx.logger?.info?.(`[dsh-autofork] 已启用：${describeParams(params)}`)
+  ctx.logger?.info?.(`[dsh-autofork] 已启用：${describeParams(params, forkMode())}`)
 
   /* ------------------------------ 诊断通道 ------------------------------ */
 
@@ -299,7 +309,7 @@ export function apply(ctx, config) {
       /* 诊断通道失败不得影响主流程 */
     }
   }
-  debug('apply', { params: describeParams(params), pid: process.pid })
+  debug('apply', { params: describeParams(params, forkMode()), pid: process.pid })
 
   /* ------------------------------ 家族（血缘树） ------------------------------ */
 
@@ -396,17 +406,20 @@ export function apply(ctx, config) {
    */
   function familyOf(sessionId) {
     const root = familyRootOf(sessionId)
-    // 整棵树：从根开始按创建时间做 BFS（每个节点只进一次，防环）。
+    // 整棵树：从根开始按创建时间做 BFS（每个节点只进一次，防环），**顺带记下深度**——
+    // `familyNodes`（页签）要深度画层级，`relatedSessions`（工具）只要关系标签：
+    // 两边共用**这一次**遍历（用户 2026-10："双重路径收敛成单一信息"）。
     const all = []
     const seen = new Set()
-    const queue = [root]
+    const queue = [{ id: root, depth: 0 }]
     while (queue.length > 0) {
-      const cursor = queue.shift()
-      if (seen.has(cursor)) continue
-      seen.add(cursor)
-      all.push(cursor)
-      for (const headId of headsOf(cursor)) queue.push(headId)
+      const item = queue.shift()
+      if (seen.has(item.id)) continue
+      seen.add(item.id)
+      all.push(item)
+      for (const headId of headsOf(item.id)) queue.push({ id: headId, depth: item.depth + 1 })
     }
+    const ids = all.map(item => item.id)
     const upstream = []
     const walked = new Set([sessionId])
     let cursor = sessionId
@@ -432,7 +445,7 @@ export function apply(ctx, config) {
     const upSet = new Set(upstream)
     const downSet = new Set(downstream)
     downSet.add(sessionId)
-    const siblings = all.filter(id => !upSet.has(id) && !downSet.has(id))
+    const siblings = ids.filter(id => !upSet.has(id) && !downSet.has(id))
     return { root, upstream, downstream, siblings, all }
   }
 
@@ -599,13 +612,38 @@ export function apply(ctx, config) {
     const driverId = downstream.length === 0
       ? sessionId
       : downstream[downstream.length - 1]
-    const agent = ctx.agents.get(driverId)
+    const state = stateOf(driverId)
     return {
       sessionId: driverId,
       self: driverId === sessionId,
       label: driverId === sessionId ? '本会话' : driverLabel(driverId),
-      busy: agent?.status === 'running',
+      busy: state === 'running',
     }
+  }
+
+  /**
+   * 一个会话的**实时三态**——**唯一来源**。
+   *
+   * 曾经 `driverView`（只有两态 `busy`）、`memberView`、`familyNodes` 各写一遍，于是同一份事实
+   * 有三个实现：事实 21 那个 `[running] 已停` 的自相矛盾就是这类漂移的产物（用户 2026-10 要求：
+   * 双重路径收敛成单一信息）。
+   * @param {string} sessionId 会话 id。
+   * @returns {'running'|'idle'|'finished'} 运行中 / 空闲 / agent 已不在。
+   */
+  function stateOf(sessionId) {
+    const agent = ctx.agents.get(sessionId)
+    return agent === undefined ? 'finished' : (agent.status === 'running' ? 'running' : 'idle')
+  }
+
+  /**
+   * 一个会话的**显示标题**——**唯一回退链**：活会话的标题 → 内存记录里的标题 → 持久化边里的标题。
+   *
+   * 曾经 `memberView` 与 `familyNodes` 各写一条（末尾还一个 `''` 一个 `null`），字段类型都不一致。
+   * @param {string} sessionId 会话 id。
+   * @returns {string|null} 标题；都没有时为 null（调用方决定怎么显示"没有名字"）。
+   */
+  function titleOf(sessionId) {
+    return titleOfLive(sessionId) ?? recordByHead.get(sessionId)?.title ?? lineageTitleOf(sessionId) ?? null
   }
 
   /**
@@ -615,10 +653,9 @@ export function apply(ctx, config) {
    * @returns {{sessionId: string, relation: string, state: string, busy: boolean, title: string}} 视图。
    */
   function memberView(sessionId, relation) {
-    const agent = ctx.agents.get(sessionId)
     // `state` 必须是**实时且互斥**的三态，不能是"agent 对象还在不在"——
     // 后者会让"活着但空闲"的会话同时显示成 running 与"已停"（用户实测报的歧义）。
-    const state = agent === undefined ? 'finished' : (agent.status === 'running' ? 'running' : 'idle')
+    const state = stateOf(sessionId)
     return {
       sessionId,
       relation,
@@ -629,7 +666,7 @@ export function apply(ctx, config) {
       // `additionalProperties: false` 的封闭形状，`string|null` 得写成 `oneOf`，
       // 而 `oneOf` 又不允许与 `required` 并列（官方 JSON-schema 子集的规定）。
       // 空串在渲染侧当"没有名字"处理。
-      title: titleOfLive(sessionId) ?? recordByHead.get(sessionId)?.title ?? lineageTitleOf(sessionId) ?? '',
+      title: titleOf(sessionId) ?? '',
     }
   }
 
@@ -643,37 +680,29 @@ export function apply(ctx, config) {
    */
   function familyNodes(sessionId) {
     pruneRecords()
-    const { root } = familyOf(sessionId)
-    // 从**根**做 BFS，深度即缩进。这样兄弟分叉（同一条会话被分叉两次）也都在，
-    // 而沿链走只会看见其中一条——那正是"我分出去的另一条哪去了"的来源。
-    const nodes = []
-    const seen = new Set()
-    const queue = [{ id: root, depth: 0 }]
-    while (queue.length > 0) {
-      const item = queue.shift()
-      if (seen.has(item.id)) continue
-      seen.add(item.id)
+    // **共用 `familyOf` 的那一次遍历**（含深度）——这里曾经自己又 BFS 了一遍，是同一份事实的第二个
+    // 实现（用户 2026-10 要求收敛成单一信息）。视图只做投影：把每条会话变成卡片要的字段。
+    const { all } = familyOf(sessionId)
+    return all.map(item => {
       const edge = edgeOf(item.id)
-      const agent = ctx.agents.get(item.id)
-      const state = agent === undefined ? 'finished' : (agent.status === 'running' ? 'running' : 'idle')
+      const state = stateOf(item.id)
       const ordinal = edge?.ordinal ?? recordByHead.get(item.id)?.titleOrdinal ?? 0
-      const full = titleOfLive(item.id) ?? edge?.title ?? lineageTitleOf(item.id) ?? null
+      const full = titleOf(item.id)
       // `label`：把**已经由徽章表达**的 `<标记><序号> ` 前缀去掉之后的显示名。
-      // 页签左边就有一枚 `⑂1` 徽章，名字里再带一遍会读成"⑂1 ⑂1 修 GUI 卡顿"（实测
-      // 在预览里一眼看到）。前缀用 `params.titleMark` + 序号精确匹配，不是正则猜——
-      // 标记是可配的，配了自定义标记时这里也照样对得上。
+      // 页签左边就有一枚 `⑂1` 徽章，名字里再带一遍会读成"⑂1 ⑂1 修 GUI 卡顿"（实测在预览里
+      // 一眼看到）。前缀用 `params.titleMark` + 序号精确匹配，不是正则猜——标记是可配的。
       const prefix = ordinal > 0 && params.titleMark !== '' ? `${params.titleMark}${ordinal} ` : ''
       const label = prefix !== '' && typeof full === 'string' && full.startsWith(prefix)
         ? full.slice(prefix.length)
         : full
-      nodes.push({
+      return {
         sessionId: item.id,
         title: full,
         /** 显示名（去掉徽章已经表达过的 `<标记><序号> ` 前缀）；UI 用它，工具面不用。 */
         label,
         state,
         busy: state === 'running',
-        /** 树上的深度：0 = 家族根（最开始那条会话）。UI 用它做缩进。 */
+        /** 树上的深度：0 = 家族根（最开始那条会话）。UI 用它画层级。 */
         depth: item.depth,
         /** 是不是用户此刻正在看的那条。 */
         current: item.id === sessionId,
@@ -686,10 +715,8 @@ export function apply(ctx, config) {
         trigger: edge?.trigger ?? recordByHead.get(item.id)?.trigger ?? '',
         /** 命名序号（`<标记><ordinal>`）；没开命名或家族根时为 0。 */
         ordinal,
-      })
-      for (const headId of headsOf(item.id)) queue.push({ id: headId, depth: item.depth + 1 })
-    }
-    return nodes
+      }
+    })
   }
 
   /**
@@ -1161,7 +1188,29 @@ export function apply(ctx, config) {
    * @returns {string} 带发送方前缀的正文。
    */
   function senderPrefixed(senderId, text, what, note) {
-    return `分叉会话 ${senderId} 发来${what}${note === undefined ? '' : `（${note}）`}：${text}`
+    return prefixedBody(senderId, text, what, note).text
+  }
+
+  /**
+   * 卡片标记的**权威清单**（宿主 half）。客户端 half 的 `CARD_TITLES` 必须与它一一对应：
+   * 两个 half 是各自独立的产物（客户端 bundle 跑在浏览器里、无法 import 宿主模块），
+   * 所以这条跨半边契约由**门禁 4** 静态比对（用户 2026-10：双重路径要收敛成单一信息）。
+   */
+  const CARD_MARKERS = ['notice', 'digest', 'reply', 'steer']
+
+  /**
+   * 正文 + **前缀长度**。长度是关键：客户端要剥掉那段前缀，但**不该重新解析语法**
+   * （两个 half 各写一份"前缀长什么样"就是双重路径）。宿主是正文的产出者，由它给出偏移量，
+   * 客户端只做切片（用户 2026-10 的"单一信息"）。
+   * @param {string} senderId 发送方会话 id。
+   * @param {string} text 正文。
+   * @param {string} what 消息类别（`消息`）。
+   * @param {string} [note] 括号里的附注（如 `它在等你回复`）。
+   * @returns {{text: string, prefixLength: number}} 正文与前缀长度。
+   */
+  function prefixedBody(senderId, text, what, note) {
+    const prefix = `分叉会话 ${senderId} 发来${what}${note === undefined ? '' : `（${note}）`}：`
+    return { text: prefix + text, prefixLength: prefix.length }
   }
 
   /**
@@ -1178,8 +1227,13 @@ export function apply(ctx, config) {
    * @returns {any} 一条 user/message。
    */
   function agentMessage(senderId, text, marker, awaitReply) {
+    if (!CARD_MARKERS.includes(marker)) {
+      // 不是失败路径：只是让"新加了标记却忘了客户端标题"在开发期可见（门禁 4 兜底静态检查）。
+      debug('cards.unknown-marker', { marker })
+    }
+    const body = prefixedBody(senderId, text, '消息', awaitReply === true ? '它在等你回复' : undefined)
     return createUserMessage({
-      content: [{ type: 'text', text: senderPrefixed(senderId, text, '消息', awaitReply === true ? '它在等你回复' : undefined) }],
+      content: [{ type: 'text', text: body.text }],
       /**
        * `autofork` 是本插件自己的**种类标记**（会话格式只校验 `kind` 非空且不是 `plugin`，
        * 其余字段原样保留）：客户端 half 用它认领这三条并画成卡片。
@@ -1195,6 +1249,8 @@ export function apply(ctx, config) {
         form: 'relay',
         senderSessionId: senderId,
         autofork: marker,
+        /** 正文里发送方前缀的长度：客户端按它切片（**不解析语法**，见 `prefixedBody`）。 */
+        bodyOffset: body.prefixLength,
         ...(awaitReply === true ? { awaitReply: true } : {}),
       },
     })
@@ -2143,12 +2199,14 @@ export function apply(ctx, config) {
         json(200, {
           ok: true,
           plugin: name,
-          // `params` 是 apply 时刻的快照，`forkMode` 可能已被用户在设置里改过（volatile 原地换值）
-          // ⇒ 用**当前值**覆盖，否则同一份响应里两个字段会自相矛盾。
-          params: { ...params, forkMode: forkMode() },
           /**
-           * 当前生效的分叉方式。客户端据此决定队列行上要不要挂「分叉」按钮——
-           * **以服务端为准**（不是读设置文档），所以按钮只会出现在宿主真的会按它行事时。
+           * 参数快照——**不含 `forkMode`**：它是 volatile、用户能在设置里原地改，快照值与当前值
+           * 会自相矛盾（0.2.0 起用覆盖掩盖，用户 2026-10 要求收敛成一个来源）。当前值只走 `mode`。
+           */
+          params: withoutForkMode(params),
+          /**
+           * 当前生效的分叉方式（**唯一来源**，现取）。客户端据此决定队列行上要不要挂「分叉」按钮
+           * ——以服务端为准（不是读设置文档），所以按钮只会出现在宿主真的会按它行事时。
            */
           mode: forkMode(),
           tools: exposedToolNames,

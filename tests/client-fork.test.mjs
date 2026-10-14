@@ -411,7 +411,11 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
   const steerCard = { type: 'user/message', seq: 8, time: 1_700_000_000_000, data: {
     id: 'm-steer',
     content: [{ type: 'text', text: '分叉会话 session-sender 发来消息：请报告进度' }],
-    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-sender', autofork: 'steer' },
+    source: {
+      kind: 'agent-message', form: 'relay', senderSessionId: 'session-sender', autofork: 'steer',
+      // 宿主给出的**前缀长度**：客户端按它切片（不解析语法）。
+      bodyOffset: '分叉会话 session-sender 发来消息：'.length,
+    },
   } }
   assert.deepEqual(definition.match(steerCard), { id: 'm-steer', role: 'start' })
   const steerContext = { key: '8:autofork-messagem-steer', id: 'm-steer', start: { location: { kind: 'unresolved' } }, state: undefined }
@@ -456,8 +460,8 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
     { type: entry.component, props: { node }, children: [] }, { states: [true] })
   const strippedTree = expanded(awaitNode)
   assert.equal(bodyOf(strippedTree), '请报告进度', '正文要剥掉插件自己写的前缀')
-  // ② 形状不匹配就**原样**显示（呈现层不做模糊处理）
-  const bareNode = { ...awaitNode, data: { ...awaitNode.data, text: '裸正文：不做任何切分' } }
+  // ② 没有偏移量（老消息）就**原样**显示（呈现层不做模糊处理、也不猜语法）
+  const bareNode = { ...awaitNode, data: { ...awaitNode.data, text: '裸正文：不做任何切分', bodyOffset: 0 } }
   const bareTree = expanded(bareNode)
   assert.equal(bodyOf(bareTree), '裸正文：不做任何切分', '不匹配前缀时原样显示')
   // ③ 任何情况下正文 ⊆ 模型可见文本，且不含模型看不到的句子

@@ -9,6 +9,11 @@
  * 门禁 2 —— **参数文档不漂移**。README 的参数表是用户唯一能看到的可调面；
  * 它与 `DEFAULT_PARAMS` 的键集必须双向一致（缺一或多一都失败）。
  *
+ * 门禁 4 —— **跨半边的卡片契约不漂移**。宿主 half 的 `CARD_MARKERS`（它能写出的 `source.autofork`
+ * 标记）与客户端 half 的 `CARD_TITLES`（它能画出的卡片标题）必须**一一对应**：两个 half 是各自
+ * 独立的产物（客户端 bundle 跑在浏览器里、无法 import 宿主模块），所以这条契约只能靠门禁守
+ * ——漂了的表现是"卡片有消息没标题"（静默、只在真机上出现）。
+ *
  * 跑法：node scripts/gate.mjs
  */
 import { readFileSync } from 'node:fs'
@@ -150,6 +155,35 @@ if (clientRel !== undefined) {
     const clientInject = manifest.dsh?.client?.inject
     if (!Array.isArray(clientInject) || clientInject.length === 0) {
       failures.push('门禁3：dsh.client.inject 必须是非空数组（声明该 half 依赖的客户端包）')
+    }
+  }
+}
+
+/* ------------------------------ 门禁 4 ------------------------------ */
+
+{
+  const hostSource = readFileSync(join(root, 'index.mjs'), 'utf8')
+  const markersMatch = hostSource.match(/const CARD_MARKERS = \[([^\]]*)\]/u)
+  if (markersMatch === null) {
+    failures.push('门禁4：index.mjs 里找不到 `CARD_MARKERS`（宿主可写的卡片标记清单）')
+  } else {
+    const hostMarkers = [...markersMatch[1].matchAll(/'([^']+)'/gu)].map(match => match[1])
+    const clientSource = readFileSync(join(root, 'client', 'index.js'), 'utf8')
+    const titlesMatch = clientSource.match(/var CARD_TITLES = \{([\s\S]*?)\n    \}/u)
+    if (titlesMatch === null) {
+      failures.push('门禁4：客户端的 `CARD_TITLES` 找不到（卡片标题表）')
+    } else {
+      const clientMarkers = [...titlesMatch[1].matchAll(/^\s*([A-Za-z][\w-]*):\s*'/gmu)].map(match => match[1])
+      const missing = hostMarkers.filter(marker => !clientMarkers.includes(marker))
+      const extra = clientMarkers.filter(marker => !hostMarkers.includes(marker))
+      if (missing.length > 0) failures.push(`门禁4：客户端缺这些标记的标题：${missing.join(', ')}`)
+      if (extra.length > 0) failures.push(`门禁4：客户端多出宿主不写的标记：${extra.join(', ')}`)
+      if (hostMarkers.length === 0) failures.push('门禁4：宿主标记清单为空（标记就是卡片契约，不能空）')
+      const emptyTitle = [...titlesMatch[1].matchAll(/^\s*([A-Za-z][\w-]*):\s*''/gmu)].map(match => match[1])
+      if (emptyTitle.length > 0) failures.push(`门禁4：这些标记的标题是空串：${emptyTitle.join(', ')}`)
+      if (missing.length === 0 && extra.length === 0 && hostMarkers.length > 0) {
+        console.log(`门禁 4 通过：卡片标记 ↔ 标题一一对应（${hostMarkers.join(' / ')}）`)
+      }
     }
   }
 }

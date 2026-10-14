@@ -730,9 +730,11 @@ window.__ModuleLoader__.load({
      * @param {string} text 模型可见正文。
      * @returns {string} 呈现用正文。
      */
-    function cardBody(text) {
-      var match = /^分叉会话\s+\S+\s+发来(?:消息|中途指令)(（[^）]*）)?：/.exec(text)
-      return match === null ? text : text.slice(match[0].length)
+    function cardBody(text, offset) {
+      // **按宿主给的偏移量切片，不解析前缀语法**（用户 2026-10 的"单一信息"）：两个 half 各写一份
+      // "前缀长什么样"就是双重路径，格式一改就静默失配。偏移量缺失/越界时原样显示（老消息的
+      // `source` 里没有这个字段，它们会带着前缀——这是历史痕迹，不做模糊猜测）。
+      return typeof offset === 'number' && offset > 0 && offset < text.length ? text.slice(offset) : text
     }
 
     /**
@@ -1620,7 +1622,8 @@ window.__ModuleLoader__.load({
       var body = open === false ? null : React.createElement('div', { 'data-part': 'body' },
         React.createElement('p', { 'data-part': 'sender' }, '来自会话 ' + (data.sender === '' ? '未知' : data.sender)),
         // 正文 = 模型可见文本（剥掉卡片已表达过的前缀，见 `cardBody` 与上面的原则）。
-        React.createElement('div', { 'data-part': 'content' }, cardBody(typeof data.text === 'string' ? data.text : '')))
+        React.createElement('div', { 'data-part': 'content' },
+          cardBody(typeof data.text === 'string' ? data.text : '', data.bodyOffset)))
       return React.createElement('section', {
         [CARD_ATTR]: data.marker,
         'data-open': open ? '' : undefined,
@@ -1680,6 +1683,8 @@ window.__ModuleLoader__.load({
                 // 发送方在等回复（`fork_send(block:true)`）⇒ 标题行挂「等待回复」胶囊，
                 // 免得收方会话"收下但不回"（用户 2026-10）。
                 awaitReply: event.data.source.awaitReply === true,
+                /** 正文里发送方前缀的长度（宿主给；见 `cardBody`）。 */
+                bodyOffset: typeof event.data.source.bodyOffset === 'number' ? event.data.source.bodyOffset : 0,
                 text: (event.data.content ?? [])
                   .filter(function (part) { return part?.type === 'text' })
                   .map(function (part) { return part.text })

@@ -78,7 +78,7 @@ test('resolveParams 补齐默认值、接受覆盖、忽略未知键', () => {
 })
 
 test('describeParams 渲染关键参数，便于排查"为什么没分叉"', () => {
-  const text = describeParams(DEFAULT_PARAMS)
+  const text = describeParams(DEFAULT_PARAMS, 'auto')
   assert.match(text, /minStepAge=0ms/, '默认不设门槛：只要忙就分叉')
   assert.match(text, /maxActiveBranches=3/)
 })

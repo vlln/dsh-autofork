@@ -358,10 +358,17 @@ function applyKnownKeys(target, source) {
   }
 }
 
-/** 在日志/回注文本里标注参数来源，便于排查"为什么没分叉"。 */
-export function describeParams(params) {
+/** 在日志/回注文本里标注参数来源，便于排查"为什么没分叉"。
+ *
+ * `mode` 必须由调用方**现取**（`forkModeOf(config, params)`）：`params.forkMode` 只是 apply 时刻的
+ * 快照，而它是 volatile、用户能在设置里原地改（用户 2026-10：同一份事实不要两个来源）。
+ * @param {Record<string, unknown>} params 解析后的参数（快照）。
+ * @param {string} mode **当前**生效的分叉方式。
+ * @returns {string} 一行摘要。
+ */
+export function describeParams(params, mode) {
   return [
-    `forkMode=${params.forkMode}`,
+    `forkMode=${mode}`,
     `minStepAge=${params.minStepAgeMs}ms`,
     `coalesce=${params.coalesceWindowMs}ms`,
     `maxActiveBranches=${params.maxActiveBranches}`,
