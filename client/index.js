@@ -214,6 +214,17 @@ window.__ModuleLoader__.load({
      */
     var STATE_TEXT = { running: '运行中', idle: '空闲', finished: '已结束' }
 
+    /**
+     * 头部与说明文字的宽度约束：**仍然与「对话」转写同宽居中**（一行行的文字铺满整个内容区
+     * 会看着散）。**树画布不走这条**——用户 2026-10 要求"画布宽度放宽，最好是无边界画布"，
+     * 树按家族实际尺寸铺开，超出可用宽就横向滚动。
+     */
+    var COLUMN_STYLE = {
+      width: '100%',
+      maxWidth: 'var(--dsh-chat-content-width, 760px)',
+      margin: '0 auto',
+    }
+
     /** 空态/加载态的说明文字样式。 */
     var HINT_STYLE = {
       color: TOKEN.labelTertiary,
@@ -470,6 +481,244 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 一张卡的**事实**：卡片本体、`aria-label` 与 hover 面板**共用这一份派生**。
+     *
+     * 抽出来的理由：名字/状态/触发指令/时间以前在卡片与 tooltip 里各算一遍，两处口径容易漂；
+     * 现在派生一次，三种呈现（卡上版式 / 纯文本 / 面板版式）都从它读。
+     * @param {any} node 服务端节点。
+     * @param {any} driver 当前回答用户的会话。
+     * @param {number} now 渲染时刻（相对时间用）。
+     * @returns {any} 派生事实。
+     */
+    function cardFacts(node, driver, now) {
+      var isRoot = node.parentId === null || node.parentId === undefined
+      // 名字优先用服务端给的 `label`（**已经去掉** `<标记><序号> ` 前缀，因为徽章就是它），
+      // 退回完整 `title`，再退回会话短 id。
+      var label = typeof node.label === 'string' && node.label !== ''
+        ? node.label
+        : (typeof node.title === 'string' && node.title !== ''
+          ? node.title
+          : '会话 ' + shortId(node.sessionId))
+      var ordinal = typeof node.ordinal === 'number' && node.ordinal > 0 ? node.ordinal : 0
+      return {
+        isRoot: isRoot,
+        isCurrent: node.current === true,
+        isDriver: driver !== null && driver !== undefined && driver.sessionId === node.sessionId,
+        // 与列表版同一条判断：已结束的卡整张变淡，不再挂一枚重复的"已结束"胶囊。
+        finished: node.state === 'finished',
+        meta: STATE_META[node.state] === undefined
+          ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
+          : STATE_META[node.state],
+        label: label,
+        badge: isRoot ? '根' : '⑂' + String(ordinal),
+        ordinal: ordinal,
+        trigger: typeof node.trigger === 'string' ? node.trigger : '',
+        rel: relTime(node.at, now),
+        clock: clockOf(node.at),
+      }
+    }
+
+    /**
+     * 状态那一格的完整说法（含"你在这里 / 现在回答你的是它"），卡片、aria、面板共用。
+     * @param {any} facts {@link cardFacts} 的返回值。
+     * @returns {string} 例如 `空闲（你在这里）`。
+     */
+    function stateLine(facts) {
+      return facts.meta.text
+        + (facts.isCurrent ? '（你在这里）' : (facts.isDriver ? '（现在回答你的是它）' : ''))
+    }
+
+    /**
+     * 卡片的**纯文本**详情（`aria-label` 用；非 web 组合下也直接当原生 tooltip）。
+     * @param {any} node 服务端节点。
+     * @param {any} facts {@link cardFacts} 的返回值。
+     * @returns {string} 多行纯文本。
+     */
+    function detailText(node, facts) {
+      return [
+        facts.badge + '　' + facts.label,
+        '会话：' + node.sessionId,
+        '状态：' + stateLine(facts),
+        facts.trigger === '' ? '触发指令：—（家族根是用户自己开的会话）' : '触发指令：' + facts.trigger,
+        node.at === null || node.at === undefined
+          ? '分叉于：—'
+          : '分叉于：' + (facts.clock === '' ? '' : facts.clock)
+            + (facts.rel === '' ? '' : '（' + facts.rel + '）'),
+        facts.isCurrent ? '这就是你当前所在的会话' : '点击这张卡切到那条会话',
+      ].join('\n')
+    }
+
+    /** hover 面板的度量与落点参数（宽固定、高按内容有界，定位时用它夹在视口内）。 */
+    var HOVER = { width: 340, gap: 12, pad: 8, estH: 200 }
+
+    /**
+     * 面板里的一行「标签 + 值」。**层次就来自这条对齐**——标签列定宽、值列吃满，
+     * 而不是把 `会话：xxx` 这种整串堆在一行里（用户 2026-10 报的"信息都堆在一起"）。
+     * @param {string} label 标签（会话 / 触发指令 / 分叉于…）。
+     * @param {string} value 值。
+     * @param {{quote?: boolean}} [options] `quote` 时值是**引用块**（左侧一条强调竖线）。
+     * @returns {any} React 元素。
+     */
+    function detailRow(label, value, options) {
+      var opts = options === undefined ? {} : options
+      return React.createElement('div', {
+        key: label,
+        style: { display: 'flex', alignItems: 'flex-start', gap: '10px', minWidth: '0' },
+      }, [
+        React.createElement('span', {
+          key: 'k',
+          style: {
+            flex: 'none',
+            width: '56px',
+            fontSize: '11.5px',
+            lineHeight: '18px',
+            color: TOKEN.labelTertiary,
+          },
+        }, label),
+        React.createElement('span', {
+          key: 'v',
+          style: opts.quote === true
+            ? {
+              flex: '1 1 auto',
+              minWidth: '0',
+              fontSize: '12px',
+              lineHeight: '18px',
+              color: TOKEN.labelSecondary,
+              overflowWrap: 'anywhere',
+              // 引用块：左侧一条强调竖线 + 缩进，一眼看出"这是别人说的那句指令"。
+              borderLeft: '2px solid ' + TOKEN.accent,
+              paddingLeft: '8px',
+            }
+            : {
+              flex: '1 1 auto',
+              minWidth: '0',
+              fontSize: '12px',
+              lineHeight: '18px',
+              color: TOKEN.labelPrimary,
+              overflowWrap: 'anywhere',
+            },
+        }, value),
+      ])
+    }
+
+    /**
+     * 面板落点：默认贴在卡的**右侧**，右边放不下就翻到**左侧**；纵向夹在视口内。
+     *
+     * 用卡片的 `getBoundingClientRect()` 现测，而面板挂 `position: fixed`（经 portal 到 body）——
+     * 于是既不被画布的滚动容器裁掉，也不受横向滚动影响。
+     * @param {any} rect 卡片的视口矩形。
+     * @returns {{left: number, top: number}} 面板的 fixed 落点。
+     */
+    function hoverPlacement(rect) {
+      /* v8 ignore next 1 -- 只在浏览器里被调用（stub 没有 hover） */
+      var viewW = typeof window === 'undefined' ? 1440 : window.innerWidth
+      /* v8 ignore next 1 -- 同上 */
+      var viewH = typeof window === 'undefined' ? 900 : window.innerHeight
+      var left = rect.right + HOVER.gap
+      if (left + HOVER.width + HOVER.pad > viewW) {
+        left = Math.max(HOVER.pad, rect.left - HOVER.gap - HOVER.width)
+      }
+      var top = rect.top
+      if (top + HOVER.estH + HOVER.pad > viewH) top = Math.max(HOVER.pad, viewH - HOVER.estH - HOVER.pad)
+      return { left: left, top: top }
+    }
+
+    /**
+     * hover 详情**面板**：分三层呈现，替代原来"一段无格式文本"的原生 tooltip
+     * （用户 2026-10："hover 出现的信息没有层次，所有信息都堆在了一起"）：
+     *
+     * ① **标题行**：徽章 + 名字 + 状态胶囊（一眼是"哪条会话、什么状态"）；
+     * ② **键值行**：会话 id / 触发指令（引用块）/ 分叉时刻（绝对 · 相对）/ 位置；标签列定宽对齐；
+     * ③ **页脚**：动作提示（当前卡 / 其它卡各一句）。
+     * @param {any} props 渲染输入。
+     * @returns {any} React 元素。
+     */
+    function HoverDetail(props) {
+      var node = props.node
+      var facts = cardFacts(node, props.driver, props.now)
+      var value = function (text) { return text }
+      return React.createElement('div', {
+        'data-dsh-autofork-hover': '',
+        style: {
+          position: 'fixed',
+          left: String(props.place.left) + 'px',
+          top: String(props.place.top) + 'px',
+          width: String(HOVER.width) + 'px',
+          boxSizing: 'border-box',
+          padding: '10px 12px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+          // 浮层**不吃指针**：它只负责"看"，鼠标仍然归卡片（否则移进面板它就消失了）。
+          pointerEvents: 'none',
+          zIndex: '80',
+          background: 'var(--dsw-alias-bg-layer-2, rgba(30, 30, 30, 0.97))',
+          border: '1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.35))',
+          borderRadius: '12px',
+          boxShadow: '0 8px 24px rgba(0, 0, 0, 0.22)',
+          color: TOKEN.labelPrimary,
+        },
+      }, [
+        React.createElement('div', {
+          key: 'head',
+          style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0' },
+        }, [
+          React.createElement('span', {
+            key: 'badge',
+            style: {
+              flex: 'none',
+              padding: '0 6px',
+              height: '20px',
+              display: 'flex',
+              alignItems: 'center',
+              borderRadius: '5px',
+              background: facts.isRoot ? 'rgba(127, 127, 127, 0.14)' : 'rgba(11, 107, 203, 0.14)',
+              color: facts.isRoot ? TOKEN.labelSecondary : TOKEN.accent,
+              fontSize: '12px',
+              fontWeight: '600',
+            },
+          }, facts.badge),
+          React.createElement('span', {
+            key: 'label',
+            style: {
+              flex: '1 1 auto',
+              minWidth: '0',
+              fontSize: '13px',
+              fontWeight: '600',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            },
+          }, facts.label),
+          chip('state', facts.meta.text, facts.meta.color, facts.meta.tint),
+        ]),
+        React.createElement('div', {
+          key: 'sep',
+          style: { height: '1px', background: 'var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.22))' },
+        }),
+        React.createElement('div', {
+          key: 'rows',
+          style: { display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '0' },
+        }, [
+          detailRow('会话', node.sessionId),
+          detailRow('触发指令', facts.trigger === '' ? '—（家族根是用户自己开的会话）' : facts.trigger, {
+            quote: facts.trigger !== '',
+          }),
+          detailRow('分叉于', node.at === null || node.at === undefined
+            ? '—'
+            : (facts.clock + (facts.rel === '' ? '' : ' · ' + facts.rel))),
+          (facts.isCurrent || facts.isDriver)
+            ? detailRow('位置', value(facts.isCurrent ? '你在这里' : '现在回答你的是它'))
+            : null,
+        ]),
+        React.createElement('div', {
+          key: 'foot',
+          style: { fontSize: '11.5px', color: TOKEN.labelTertiary },
+        }, facts.isCurrent ? '这就是你当前所在的会话' : '点击这张卡切到那条会话'),
+      ])
+    }
+
+    /**
      * 树状图上的一张节点卡。
      *
      * 一张卡回答三件事（与列表版一致，只是换了载体）：**这是哪条会话**（徽章 + 名字）、
@@ -484,26 +733,18 @@ window.__ModuleLoader__.load({
       var node = props.node
       var driver = props.driver
       var now = props.now
-      var isCurrent = node.current === true
-      var isDriver = driver !== null && driver !== undefined && driver.sessionId === node.sessionId
-      var isRoot = node.parentId === null || node.parentId === undefined
+      var facts = cardFacts(node, driver, now)
+      var isCurrent = facts.isCurrent
+      var isDriver = facts.isDriver
+      var isRoot = facts.isRoot
       var hover = props.hovered === true
-      var meta = STATE_META[node.state] === undefined
-        ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
-        : STATE_META[node.state]
-      // 名字优先用服务端给的 `label`（**已经去掉** `<标记><序号> ` 前缀，因为左边那枚徽章
-      // 就是它），退回完整 `title`，再退回会话短 id。
-      var label = typeof node.label === 'string' && node.label !== ''
-        ? node.label
-        : (typeof node.title === 'string' && node.title !== ''
-          ? node.title
-          : '会话 ' + shortId(node.sessionId))
-      var ordinal = typeof node.ordinal === 'number' && node.ordinal > 0 ? node.ordinal : 0
-      var trigger = typeof node.trigger === 'string' ? node.trigger : ''
-      var rel = relTime(node.at, now)
-      var clock = clockOf(node.at)
-      var finished = node.state === 'finished'
-      // 与列表版同一条判断：已结束的卡整张变淡，不再挂一枚重复的"已结束"胶囊。
+      var meta = facts.meta
+      var label = facts.label
+      var ordinal = facts.ordinal
+      var trigger = facts.trigger
+      var rel = facts.rel
+      var clock = facts.clock
+      var finished = facts.finished
       var showState = finished !== true
 
       var navigate = function () { if (!isCurrent) navTo(node.sessionId) }
@@ -513,20 +754,12 @@ window.__ModuleLoader__.load({
         // 稳定的 DOM 锚：渲染自证按它认卡，浏览器里排障（或 CDP 检查）也按它查。
         'data-session-id': node.sessionId,
         'aria-current': isCurrent ? 'true' : undefined,
-        // **整张卡一个 tooltip**（用户 2026-10 要求）：以前名字/触发指令/时间/值守胶囊各有
-        // 自己的 title，鼠标落在卡内不同位置会看到不同信息。现在卡内**不再有任何** title，
-        // 只有这里一处，且所有卡结构一致（原生多行 tooltip，与侧栏会话行同一套观感）。
-        title: [
-          (isRoot ? '家族根' : '⑂' + String(ordinal)) + '　' + label,
-          '会话：' + node.sessionId,
-          '状态：' + meta.text
-            + (isCurrent ? '（你在这里）' : (isDriver ? '（现在回答你的是它）' : '')),
-          trigger === '' ? '触发指令：—（家族根是用户自己开的会话）' : '触发指令：' + trigger,
-          node.at === null || node.at === undefined
-            ? '分叉于：—'
-            : '分叉于：' + (clock === '' ? '' : clock) + (rel === '' ? '' : '（' + rel + '）'),
-          isCurrent ? '这就是你当前所在的会话' : '点击这张卡切到那条会话',
-        ].join('\n'),
+        // **整张卡一个详情**（用户 2026-10 要求）：卡内任何元素都不再自带 info，鼠标在卡内
+        // 移动不会换信息。有 `react-dom` 时详情是**分层面板**（`HoverDetail`，见上），
+        // 所以这里只留 `aria-label`（纯文本，屏幕阅读器用）；没有 react-dom 的组合退回
+        // 原生多行 `title`，保证非 web 场景也有详情可看。
+        'aria-label': detailText(node, facts),
+        title: reactDom === undefined ? detailText(node, facts) : undefined,
         onClick: navigate,
         onKeyDown: function (event) {
           if (event.key === 'Enter' || event.key === ' ') {
@@ -534,8 +767,11 @@ window.__ModuleLoader__.load({
             navigate()
           }
         },
-        onMouseEnter: function () { props.onHover(node.sessionId) },
+        onMouseEnter: function (event) { props.onHover(node.sessionId, event.currentTarget) },
         onMouseLeave: function () { props.onHover(null) },
+        // 键盘走查也出同一张面板（`title` 在焦点上本来就不显示，这里顺手补上）。
+        onFocus: function (event) { props.onHover(node.sessionId, event.currentTarget) },
+        onBlur: function () { props.onHover(null) },
         style: {
           position: 'absolute',
           left: String(props.point.x) + 'px',
@@ -1373,11 +1609,25 @@ window.__ModuleLoader__.load({
       // 所以自己每 30 秒推一次重渲染：粒度粗到不会看到数字乱跳，也够用来看"这条还在跑多久了"。
       var tickPair = React.useState(0)
       var setTick = tickPair[1]
-      // 悬停在哪张卡上（null = 没悬停）。它同时驱动两件事：那张卡的抬升、以及**血统聚焦**
-      // （祖先链 + 子树高亮，其余淡出）——树状图相对层次列表多出来的可读性就在这条上。
+      // 悬停/聚焦在哪张卡上（`{id, rect}`；null = 没有）。它驱动三件事：那张卡的抬升、
+      // **血统聚焦**（祖先链 + 子树高亮，其余淡出）、以及右上角那张**分层详情面板**的定位。
       var hoverPair = React.useState(null)
-      var hoverId = hoverPair[0]
-      var setHoverId = hoverPair[1]
+      var hover = hoverPair[0]
+      var setHover = hoverPair[1]
+      /**
+       * 卡片上报 hover/focus：连**视口矩形**一起收下——面板是 `position: fixed` 的浮层，
+       * 有矩形才能贴在卡的旁边（而不是靠猜画布坐标，滚动/缩放时也不必重算）。
+       * @param {string|null} id 会话 id；null = 离开。
+       * @param {any} element 触发事件的卡片元素。
+       */
+      var onHoverCard = function (id, element) {
+        if (id === null || element === null || element === undefined
+          || typeof element.getBoundingClientRect !== 'function') {
+          setHover(null)
+          return
+        }
+        setHover({ id: id, rect: element.getBoundingClientRect() })
+      }
       React.useEffect(function () {
         var timer = setInterval(function () { setTick(function (value) { return value + 1 }) }, 30000)
         return function () { clearInterval(timer) }
@@ -1401,12 +1651,12 @@ window.__ModuleLoader__.load({
         if (nodes.length === 1) summary.push('还没有分叉')
         children.push(React.createElement('div', {
           key: 'summary',
-          style: {
+          style: Object.assign({
             display: 'flex',
             alignItems: 'baseline',
             gap: '8px',
             marginBottom: '6px',
-          },
+          }, COLUMN_STYLE),
         }, [
           React.createElement('div', {
             key: 'a',
@@ -1420,6 +1670,7 @@ window.__ModuleLoader__.load({
         // 树状图：**连线层（SVG）+ 卡片层（绝对定位）**，与 dsh-context 的 subagent 树同一套语法。
         // 连线的端点落在卡片的边中点上，所以布局与卡片必须共用 `TREE` 的度量（改一处就得改另一处）。
         var tree = layoutFamily(nodes)
+        var hoverId = hover === null || hover === undefined ? null : hover.id
         var lit = hoverId === null ? null : lineageOf(nodes, hoverId)
         var cards = tree.points.map(function (point) {
           return React.createElement(FamilyNodeCard, {
@@ -1430,7 +1681,7 @@ window.__ModuleLoader__.load({
             now: now,
             hovered: hoverId === point.node.sessionId,
             dimmed: lit !== null && !lit.has(point.node.sessionId),
-            onHover: setHoverId,
+            onHover: onHoverCard,
           })
         })
         // 连线层先建好，再套进画布——层级压平，阅读与改动都不容易数错括号。
@@ -1464,6 +1715,25 @@ window.__ModuleLoader__.load({
             margin: '0 auto',
           },
         }, [links].concat(cards))
+        // 悬停那张卡的**分层详情面板**：portal 到 `body`，于是不会被画布的滚动容器裁掉，
+        // 横向滚动时也不会跟着画布漂。没有 `react-dom`（非 web 组合）时不出面板——
+        // 那时卡片自带原生 `title` 兜底（见 `FamilyNodeCard`）。
+        var hoveredNode = null
+        if (hoverId !== null) {
+          for (var hi = 0; hi < nodes.length; hi += 1) {
+            if (nodes[hi].sessionId === hoverId) hoveredNode = nodes[hi]
+          }
+        }
+        if (hoveredNode !== null && reactDom !== undefined
+          && typeof reactDom.createPortal === 'function' && typeof document !== 'undefined') {
+          children.push(reactDom.createPortal(React.createElement(HoverDetail, {
+            key: 'hover-detail',
+            node: hoveredNode,
+            driver: driver,
+            now: now,
+            place: hoverPlacement(hover.rect),
+          }), document.body))
+        }
         children.push(React.createElement('div', {
           key: 'tree',
           // 家族宽了就横向滚动，而不是把卡片压扁 —— 树形要看得清"谁挂在谁下面"，
@@ -1473,7 +1743,7 @@ window.__ModuleLoader__.load({
         if (nodes.length === 1) {
           children.push(React.createElement('div', {
             key: 'empty',
-            style: Object.assign({ marginTop: '10px', maxWidth: '52ch' }, HINT_STYLE),
+            style: Object.assign({ marginTop: '10px', maxWidth: '52ch' }, COLUMN_STYLE, HINT_STYLE),
           }, '当它正忙（模型在生成 / 工具在执行）时你再发一条指令，就会自动分叉出新会话：'
             + '你立刻在新的那条里继续说话，这条留在后台把活干完、结果回注过来。'))
         }
@@ -1494,11 +1764,9 @@ window.__ModuleLoader__.load({
           flexDirection: 'column',
           minHeight: '0',
           overflowY: 'auto',
-          // 与「对话」页签的转写同宽并居中：铺满整个内容区（约 1000px）会让一行里的信息
-          // 拉得很散、看着吵。`--dsh-chat-content-width` 由会话外壳定义在本视图的祖先上。
+          // **视图根不再限宽**：树画布要能占满可用宽（见 `COLUMN_STYLE` 的说明），
+          // 宽度约束只留给头部与说明文字。
           width: '100%',
-          maxWidth: 'var(--dsh-chat-content-width, 760px)',
-          margin: '0 auto',
           boxSizing: 'border-box',
           padding: '18px 24px 28px',
           fontSize: 'var(--dsw-font-xs-13, 13px)',
