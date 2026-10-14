@@ -77,12 +77,12 @@ const RESULT_SCHEMA = {
  * 三个取值**互斥且自解释**（`state` 由 index.mjs 的 `memberView` 计算）：
  *  · `running`  — agent 还活着，且**正在跑**它自己的 turn；
  *  · `idle`     — agent 还活着，但此刻空闲（可以立刻接话）；
- *  · `finished` — agent 已经不在了（这条会话的进程侧已结束，日志仍在）。
+ *  · `finished` — 这条会话此刻**不在本进程**（日志在盘上；再发消息会**自动恢复**它）。
  */
 const STATE_LABEL = {
   running: '运行中（正在跑自己的 turn）',
   idle: '空闲（可以立刻接话）',
-  finished: '已结束（agent 已不在）',
+  finished: '未运行（不在本进程，可恢复）',
 }
 
 export function renderRelated(_args, value) {

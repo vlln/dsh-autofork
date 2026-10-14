@@ -218,7 +218,7 @@ window.__ModuleLoader__.load({
      * "忙不忙"两个含义不同的字段——于是"活着但空闲"的会话同时显示成运行中与已停
      * （用户实测报的歧义）。现在两边都只有一态一个词。
      */
-    var STATE_TEXT = { running: '运行中', idle: '空闲', finished: '已结束' }
+    var STATE_TEXT = { running: '运行中', idle: '空闲', finished: '未运行' }
 
     /**
      * 头部与说明文字的宽度约束：**仍然与「对话」转写同宽居中**（一行行的文字铺满整个内容区
@@ -249,7 +249,7 @@ window.__ModuleLoader__.load({
     var STATE_META = {
       running: { text: '运行中', color: TOKEN.accent, tint: 'rgba(11, 107, 203, 0.12)' },
       idle: { text: '空闲', color: TOKEN.labelSecondary, tint: 'rgba(127, 127, 127, 0.14)' },
-      finished: { text: '已结束', color: TOKEN.caption, tint: 'rgba(127, 127, 127, 0.10)' },
+      finished: { text: '未运行', color: TOKEN.caption, tint: 'rgba(127, 127, 127, 0.10)' },
     }
 
     /**
@@ -510,7 +510,7 @@ window.__ModuleLoader__.load({
         isRoot: isRoot,
         isCurrent: node.current === true,
         isDriver: driver !== null && driver !== undefined && driver.sessionId === node.sessionId,
-        // 与列表版同一条判断：已结束的卡整张变淡，不再挂一枚重复的"已结束"胶囊。
+        // 与列表版同一条判断：未运行的卡整张变淡，不再挂一枚重复的"未运行"胶囊。
         finished: node.state === 'finished',
         meta: STATE_META[node.state] === undefined
           ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
@@ -748,7 +748,7 @@ window.__ModuleLoader__.load({
      * 树状图上的一张节点卡。
      *
      * 一张卡回答三件事（与列表版一致，只是换了载体）：**这是哪条会话**（徽章 + 名字）、
-     * **它此刻在干什么**（活着才挂状态胶囊；已结束的整张变淡）、**这次分叉是为什么、多久之前**
+     * **它此刻在干什么**（活着才挂状态胶囊；未运行的整张变淡）、**这次分叉是为什么、多久之前**
      * （触发指令 + 右侧相对时间）。
      *
      * **hover 契约**：整张卡只有**一个** tooltip（挂在卡根上），内容是完整会话 id、状态、

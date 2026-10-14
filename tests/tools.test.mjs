@@ -147,7 +147,7 @@ test('renderRelated 空家族给明确文本，非空逐行带方向箭头', () 
   assert.match(text, new RegExp(UPSTREAM))
   assert.match(text, new RegExp(DOWNSTREAM))
   assert.match(text, /运行中/)
-  assert.match(text, /已结束/)
+  assert.match(text, /未运行/)
   // **不许**再把两个含义不同的字段并排打出来（曾出现 `[running] 已停` 这种自相矛盾的行）。
   assert.equal(text.includes('已停'), false, `不得出现"已停"这种与 state 冲突的措辞：${text}`)
   assert.equal(text.includes('['), false, `不得再渲染裸枚举：${text}`)
@@ -186,7 +186,7 @@ test('家族状态三态互斥：活着但空闲显示"空闲"，不得与"运�
   assert.equal(rows.length, 3)
   assert.match(rows[0], /运行中/)
   assert.match(rows[1], /空闲/)
-  assert.match(rows[2], /已结束/)
+  assert.match(rows[2], /未运行/)
   // 用户实测报的歧义：同一行同时出现"运行"与"停"——现在每行只有一个标签。
   for (const row of rows) {
     assert.equal(/已停/.test(row), false, row)

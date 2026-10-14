@@ -117,7 +117,7 @@ function harness(options = {}) {
   const projection = options.projection ?? PROJECTION
   const listeners = new Map()
   const calls = {
-    agentsCreate: [], injections: [], followups: [], steers: [], removes: [],
+    agentsCreate: [], agentsResume: [], injections: [], followups: [], steers: [], removes: [],
     registeredTools: [], cancels: [], effects: [], requeued: [], nestedInject: [], appended: [],
     /** 注册过的 webServer 路由（health 探针），供测试直接调用 handler。 */
     routes: [],
@@ -218,6 +218,25 @@ function harness(options = {}) {
     logger: { info() {}, warn() {} },
     agents: {
       get: (id) => createdAgents.get(id),
+      /**
+       * **恢复入口**（`@deepseek-ai/dsh-agent` 的 `agents.resume`："Load a persisted session and
+       * resume an agent on it"）。桩里造一个"够投递用"的最小活会话 —— `fork_send` 的非阻塞路径
+       * 只需要 `steer` 与 `id`。
+       */
+      ...(options.noResume === true ? {} : {
+        resume: async (opts) => {
+          calls.agentsResume.push(opts)
+          if (options.resumeFails === true) throw new Error('stub: session/writer-held')
+          const revived = {
+            id: opts.resumeSessionId,
+            status: 'idle',
+            session: { id: opts.resumeSessionId, header: { id: opts.resumeSessionId } },
+            steer: (message) => { calls.steers.push(message) },
+          }
+          createdAgents.set(opts.resumeSessionId, revived)
+          return { agent: revived }
+        },
+      }),
       create: async (opts) => {
         calls.agentsCreate.push(opts)
         // 子会话的**可写日志**。卡片化之后插件会把分叉通知 / 在飞摘要 / 后台回注写成 head
@@ -2558,4 +2577,69 @@ test('自动回注开关的路由：自定义头 / POST / 形状 / **按会话**
   assert.equal(write.sessionId, 'session-parent', '键 = **会话 id**（不是家族根）')
   assert.equal(write.setting.muted, true, '开关落进 session_settings 表')
   assert.equal(typeof write.setting.updatedAt, 'number')
+})
+
+test('fork_send 对**不在本进程**的家族成员：先恢复再投递（不再自我限制）', async () => {
+  // 用户 2026-10 纠正："即使不在进程中，任意 session 也是可以恢复的。为什么这里要专门区分
+  // '不能唤醒'？看起来像自我限制。" —— 对，那是自我限制。官方入口是 `ctx.agents.resume`
+  // （"Load a persisted session and resume an agent on it"），与界面打开旧会话同一条路。
+  const stub = await forkedFamily()
+  const { calls, ctx, tool, head } = stub
+  // 把目标"踢出本进程"：日志与血缘都还在，agent 不在了（正是重启后的常态）。
+  stub.createdAgents.delete('session-parent')
+  assert.equal(ctx.agents.get('session-parent'), undefined, '前提：目标此刻确实不在运行')
+
+  const result = await tool.execute(
+    { sessionId: 'session-parent', text: '这条要送达一条不在运行的会话' },
+    { agent: head },
+  )
+  assert.equal(result.ok, true, '不该再回绝（"任意 session 都可以恢复"）')
+  assert.equal(calls.agentsResume.at(-1)?.resumeSessionId, 'session-parent', '要走官方恢复入口')
+  assert.equal(ctx.agents.get('session-parent') !== undefined, true, '恢复之后它是活的')
+  assert.equal(calls.steers.length, 1, '恢复之后照常投递')
+  assert.match(result.detail, /已自动恢复/, '回执要说明它此前不在运行、被唤醒了')
+})
+
+test('fork_send 恢复失败（会话正被别的进程打开）：如实回报，且**不假装已投递**', async () => {
+  const stub = await forkedFamily()
+  const { calls, tool, head } = stub
+  stub.createdAgents.delete('session-parent')
+  // 写租约被占：`resume` 会抛（真实世界是 session/writer-held）
+  const failing = harness({
+    events: stub.events,
+    resumeFails: true,
+  })
+  applyChain(failing.ctx, { forkSendBlockTimeoutMs: 5000 })
+  failing.emitInsert(userMessage())
+  await flush()
+  const failingTool = failing.calls.registeredTools.find(candidate => candidate.name === 'fork_send')
+  const failingHead = failing.createdAgents.get(failing.calls.agentsCreate[0].sessionId)
+  failing.createdAgents.delete('session-parent')
+
+  const result = await failingTool.execute(
+    { sessionId: 'session-parent', text: '送不到就说清楚' },
+    { agent: failingHead },
+  )
+  assert.equal(result.ok, false, '恢复不了就必须如实失败')
+  assert.match(result.detail, /无法恢复/, '把可能的原因说清（正被另一个进程打开）')
+  assert.equal(failing.calls.steers.length, 0, '失败时不得有任何投递')
+  assert.equal(calls.agentsResume.length, 0, '（上一个桩没被用到）')
+})
+
+test('宿主没有 agents.resume：降级成"无法恢复"，不假装成功', async () => {
+  // 老宿主 / 极简组合没有这个入口 ⇒ 类型防御：如实说恢复不了，而不是抛异常或谎报投递。
+  const stub = harness({ events: sessionLog(), noResume: true })
+  applyChain(stub.ctx, { forkSendBlockTimeoutMs: 5000 })
+  stub.emitInsert(userMessage())
+  await flush()
+  const tool = stub.calls.registeredTools.find(candidate => candidate.name === 'fork_send')
+  const head = stub.createdAgents.get(stub.calls.agentsCreate[0].sessionId)
+  stub.createdAgents.delete('session-parent')
+  const result = await tool.execute(
+    { sessionId: 'session-parent', text: 'hi' },
+    { agent: head },
+  )
+  assert.equal(result.ok, false)
+  assert.match(result.detail, /无法恢复/)
+  assert.equal(stub.calls.steers.length, 0, '没有投递就别报成功')
 })

@@ -1999,6 +1999,38 @@ export function apply(ctx, config) {
   }
 
   /**
+   * 把一条**不在本进程**的持久化会话恢复成活的 agent。
+   *
+   * **不在本进程 ≠ 不能收消息**（用户 2026-10 纠正："即使不在进程中，任意 session 也是可以恢复的"
+   * ——我原先在 `fork_send` 里直接回绝，那确实是**自我限制**）。官方入口是 `ctx.agents.resume`：
+   * "Load a persisted session and resume an agent on it through the registered factory"，
+   * 与客户端打开一条旧会话（`sessions.open`）走的是**同一条路**（实测：点开一张"未运行"的卡，
+   * 它的 agent 就活了）。插件本来就在用 `agents` 这个服务（`create`/`get`）⇒ 不需要新依赖。
+   *
+   * 两点注意：① 它要拿**写租约**（`persistence.open(id, 'write')`）⇒ 同一条会话正被另一个进程
+   * 打开时会失败（如实回报，不重试、不抢）；② 恢复出来的 agent 是**寻常活会话**、由 app 拥有，
+   * 插件**不**去 dispose 它（我们只借它投一条消息）。
+   * @param {string} sessionId 会话 id。
+   * @returns {Promise<object|undefined>} 活的 agent；恢复不了时为 undefined（原因进 debug）。
+   */
+  async function reviveAgent(sessionId) {
+    if (typeof ctx.agents?.resume !== 'function') {
+      // 老宿主没有这个入口：如实降级成"不在运行"，不假装成功。
+      debug('resume.unsupported', { session: sessionId })
+      return undefined
+    }
+    try {
+      await ctx.agents.resume({ resumeSessionId: sessionId })
+    } catch (error) {
+      debug('resume.failed', { session: sessionId, error: String(error) })
+    }
+    const agent = ctx.agents.get(sessionId)
+    if (agent === undefined) return undefined
+    debug('resume.ok', { session: sessionId })
+    return agent
+  }
+
+  /**
    * **这条会话**是否关掉了自动回注（默认开；读不到血缘时按"开"处理）。
    *
    * 判据是**会话自己**的设置，不是家族：回注是"这条会话跑完 → 投给它派生出的会话"这个行为，
@@ -2141,8 +2173,20 @@ export function apply(ctx, config) {
         if (!isFamilyMember(callerId, targetId)) {
           return { ok: false, detail: `"${targetId}" 不在你的家族里；先用 fork_list 查看。` }
         }
-        const target = ctx.agents.get(targetId)
-        if (target === undefined) return { ok: false, detail: `会话 "${targetId}" 已不在运行。` }
+        let target = ctx.agents.get(targetId)
+        let revived = false
+        if (target === undefined) {
+          // 不在本进程 ⇒ 先把它**恢复**起来再投（"任意 session 都可以恢复"，不该是自我限制）。
+          target = await reviveAgent(targetId)
+          if (target === undefined) {
+            return {
+              ok: false,
+              detail: `会话 "${targetId}" 此刻无法恢复（可能正被另一个进程打开）。`
+                + ' 用 fork_list 确认它还在家族里，或先在界面上打开它。',
+            }
+          }
+          revived = true
+        }
         // **走卡片**（与回注那三条同一套：`agent-message` + `relay` + 本插件标记）。
         // 为什么不用 `contextMessage`（一行折叠通知）：官方 `contextProducer` 对未识别的 kind
         // 直接把 **kind 当显示名**（`label: kind`），于是那一行在界面上叫 `plugin:dsh-autofork`
@@ -2150,7 +2194,9 @@ export function apply(ctx, config) {
         // 的钩子；切成我们自己的卡片后标题由 `CARD_TITLES` 给（`会话消息`），发送方也能上标题行。
         const message = agentMessage(callerId, text, 'steer', options?.block === true)
         target.steer(message)
+        // 恢复过就明说：模型该知道自己的消息**唤醒了一条不在运行的会话**（并因此会真的跑起来）。
         const delivered = `已向 "${targetId}" 投递；它会在当前 step 结束后读到。`
+          + (revived ? '（它此前不在运行，已自动恢复。）' : '')
 
         if (options?.block !== true) {
           return {

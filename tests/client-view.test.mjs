@@ -99,7 +99,7 @@ test('页签渲染：触发指令、相对时间、状态、我在哪——都�
     assert.match(text, /你在这里/)
     // 已结束的行**不再**挂状态胶囊（整行已变淡，再挂一枚同样的胶囊是纯重复）；
     // 完整会话 id 也从行里删掉了（它只留在 tooltip 上）
-    assert.ok(!text.includes('已结束'), '已结束不再重复成胶囊：\n' + text)
+    assert.ok(!text.includes('未运行'), '未运行不再重复成胶囊：\n' + text)
     assert.ok(!text.includes('000001') && !text.includes('000002'),
       '行内不再出现 6 位短 id（tooltip 里仍有完整 id）：\n' + text)
 
@@ -165,7 +165,7 @@ test('页签渲染：旧边（没有 trigger / at）只显示会话坐标，不�
     assert.match(text, /会话 000002/, '没有名字时退回会话短 id')
     // 旧数据（没有 label）时用完整 title，而不是渲染成空
     assert.ok(!/^\s*$/m.test(text), '不能渲染出空行')
-    assert.ok(!text.includes('已结束'), '已结束不再重复成胶囊')
+    assert.ok(!text.includes('未运行'), '未运行不再重复成胶囊')
     assert.ok(!/undefined|null|NaN/.test(text), '渲染文案里不能漏出 undefined：\n' + text)
   } finally {
     view.stop()
@@ -277,7 +277,7 @@ test('页签渲染：树状图 —— 连线数、父子几何、卡片不重叠
   const running = paths.find(path => path.props.key === 'session-a')
   const finished = paths.find(path => path.props.key === 'session-c')
   assert.match(String(running.props.stroke), /state-business-primary/, '运行中的那条连线用强调色')
-  assert.match(String(finished.props.stroke), /border-l2/, '已结束的那条用中性色')
+  assert.match(String(finished.props.stroke), /border-l2/, '未运行的那条用中性色')
 
   view.stop()
 })
@@ -315,7 +315,7 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
     const id = String(card.props['data-session-id'])
     const title = String(card.props.title)
     assert.match(title, new RegExp('会话：' + id), '卡根 tooltip 必须带完整会话 id')
-    assert.match(title, /状态：(运行中|空闲|已结束)/, '带状态')
+    assert.match(title, /状态：(运行中|空闲|未运行)/, '带状态')
     assert.match(title, /触发指令：/, '带触发指令（家族根给"—"）')
     assert.match(title, /分叉于：/, '带分叉时刻')
     assert.deepEqual(innerTitles(card), [], `${id} 卡内不该再有 title（否则 hover 信息会跳变）`)
