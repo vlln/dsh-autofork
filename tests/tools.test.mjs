@@ -147,7 +147,9 @@ test('renderRelated 空家族给明确文本，非空逐行带方向箭头', () 
   assert.match(text, new RegExp(UPSTREAM))
   assert.match(text, new RegExp(DOWNSTREAM))
   assert.match(text, /运行中/)
-  assert.match(text, /未运行/)
+  // 不在本进程的那一行**不打标签**（用户 2026-10：对读者无意义）——按行断言，别按全文。
+  const relRows = text.split('\n')
+  assert.equal(/运行中|空闲|未运行|已结束/.test(relRows[1]), false, '未运行不呈现：' + relRows[1])
   // **不许**再把两个含义不同的字段并排打出来（曾出现 `[running] 已停` 这种自相矛盾的行）。
   assert.equal(text.includes('已停'), false, `不得出现"已停"这种与 state 冲突的措辞：${text}`)
   assert.equal(text.includes('['), false, `不得再渲染裸枚举：${text}`)
@@ -186,7 +188,8 @@ test('家族状态三态互斥：活着但空闲显示"空闲"，不得与"运�
   assert.equal(rows.length, 3)
   assert.match(rows[0], /运行中/)
   assert.match(rows[1], /空闲/)
-  assert.match(rows[2], /未运行/)
+  // 不在本进程的那一行**不打任何状态标签**（用户 2026-10：该信息对读者无意义）
+  assert.equal(/运行中|空闲|未运行|已结束/.test(rows[2]), false, '未运行不呈现：' + rows[2])
   // 用户实测报的歧义：同一行同时出现"运行"与"停"——现在每行只有一个标签。
   for (const row of rows) {
     assert.equal(/已停/.test(row), false, row)

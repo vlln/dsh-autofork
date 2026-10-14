@@ -218,7 +218,8 @@ window.__ModuleLoader__.load({
      * "忙不忙"两个含义不同的字段——于是"活着但空闲"的会话同时显示成运行中与已停
      * （用户实测报的歧义）。现在两边都只有一态一个词。
      */
-    var STATE_TEXT = { running: '运行中', idle: '空闲', finished: '未运行' }
+    // 只留**有实时意义**的两态；"不在本进程"不在这里（它不呈现，见 `cardFacts.live`）。
+    var STATE_TEXT = { running: '运行中', idle: '空闲' }
 
     /**
      * 头部与说明文字的宽度约束：**仍然与「对话」转写同宽居中**（一行行的文字铺满整个内容区
@@ -249,7 +250,7 @@ window.__ModuleLoader__.load({
     var STATE_META = {
       running: { text: '运行中', color: TOKEN.accent, tint: 'rgba(11, 107, 203, 0.12)' },
       idle: { text: '空闲', color: TOKEN.labelSecondary, tint: 'rgba(127, 127, 127, 0.14)' },
-      finished: { text: '未运行', color: TOKEN.caption, tint: 'rgba(127, 127, 127, 0.10)' },
+      // 没有 finished：它不该被渲染（`showState` 只在 live 时为真）。
     }
 
     /**
@@ -510,8 +511,14 @@ window.__ModuleLoader__.load({
         isRoot: isRoot,
         isCurrent: node.current === true,
         isDriver: driver !== null && driver !== undefined && driver.sessionId === node.sessionId,
-        // 与列表版同一条判断：未运行的卡整张变淡，不再挂一枚重复的"未运行"胶囊。
-        finished: node.state === 'finished',
+        /**
+         * **有没有"实时状态"可报**——只有活着（`running`/`idle`）才有。
+         *
+         * ⚠️ 用户 2026-10："不需要有任何区分'未运行'，因为这对于用户是无意义的信息"。
+         * 所以"不在本进程"这件事**不呈现**：不挂胶囊、**也不给卡片降级观感**（那等于把一条实现
+         * 细节画成了状态）。它只作为内部判据存在（宿主 `stateOf`），对外一视同仁。
+         */
+        live: node.state === 'running' || node.state === 'idle',
         meta: STATE_META[node.state] === undefined
           ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
           : STATE_META[node.state],
@@ -546,7 +553,8 @@ window.__ModuleLoader__.load({
       return [
         facts.badge + '　' + facts.label,
         '会话：' + node.sessionId,
-        '状态：' + stateLine(facts),
+        // 只有"活着"才报状态；不在本进程时**整行不出现**（不是写成"未运行"——那是噪声）。
+        ...(facts.live === true ? ['状态：' + stateLine(facts)] : []),
         facts.trigger === '' ? '触发指令：—（家族根）' : '触发指令：' + facts.trigger,
         '自动回注：' + (facts.muted ? '关（它跑完不再自动把结果投给它派生出的会话）'
           : '开（它跑完会把最后一条结果自动投给它派生出的会话）'),
@@ -773,8 +781,7 @@ window.__ModuleLoader__.load({
       var trigger = facts.trigger
       var rel = facts.rel
       var clock = facts.clock
-      var finished = facts.finished
-      var showState = finished !== true
+      var showState = facts.live === true
 
       var navigate = function () { if (!isCurrent) navTo(node.sessionId) }
       return React.createElement('div', {
@@ -827,7 +834,7 @@ window.__ModuleLoader__.load({
           // 血统聚焦：与悬停那张卡无关的卡淡出（与连线的淡出同一套）。
           opacity: props.dimmed === true ? 0.42 : 1,
           transition: 'opacity 120ms ease, box-shadow 120ms ease, transform 120ms ease',
-          color: isCurrent ? TOKEN.labelPrimary : (finished ? TOKEN.caption : TOKEN.labelSecondary),
+          color: isCurrent ? TOKEN.labelPrimary : TOKEN.labelSecondary,
         },
       }, [
         React.createElement('div', {

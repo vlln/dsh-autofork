@@ -77,12 +77,14 @@ const RESULT_SCHEMA = {
  * 三个取值**互斥且自解释**（`state` 由 index.mjs 的 `memberView` 计算）：
  *  · `running`  — agent 还活着，且**正在跑**它自己的 turn；
  *  · `idle`     — agent 还活着，但此刻空闲（可以立刻接话）；
- *  · `finished` — 这条会话此刻**不在本进程**（日志在盘上；再发消息会**自动恢复**它）。
+ *  · `finished` — 这条会话此刻**不在本进程**。**这一态不对外呈现**（用户 2026-10："不需要有任何
+ *    区分'未运行'，因为这对于用户是无意义的信息"）：它留在 `state` 字段里当内部判据，
+ *    渲染时**不打印任何标签**（再发消息会自动恢复它 ⇒ 对读者也不构成决策信息）。
  */
 const STATE_LABEL = {
   running: '运行中（正在跑自己的 turn）',
   idle: '空闲（可以立刻接话）',
-  finished: '未运行（不在本进程，可恢复）',
+  // 刻意没有 finished：不呈现（见上面的说明）。
 }
 
 export function renderRelated(_args, value) {
@@ -103,7 +105,9 @@ export function renderRelated(_args, value) {
     // `[running] 已停` 这种自相矛盾的行（用户实测报的歧义）。
     // 名字（`⑂n <基名>`）非空时一并给出：模型可以直接用名字指代成员，不必只认短 id。
     const name = typeof row.title === 'string' && row.title !== '' ? `${row.title} · ` : ''
-    return `- ${name}${String(row.sessionId)}  ${arrow}  ${STATE_LABEL[row.state] ?? String(row.state)}`
+    // 有实时状态就打标签，否则**整段不出现**（不留"未运行"这类实现细节）。
+    const label = STATE_LABEL[row.state]
+    return `- ${name}${String(row.sessionId)}  ${arrow}${label === undefined ? '' : '  ' + label}`
   })
   return [{ type: 'text', text: lines.join('\n') }]
 }

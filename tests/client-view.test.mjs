@@ -315,7 +315,10 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
     const id = String(card.props['data-session-id'])
     const title = String(card.props.title)
     assert.match(title, new RegExp('会话：' + id), '卡根 tooltip 必须带完整会话 id')
-    assert.match(title, /状态：(运行中|空闲|未运行)/, '带状态')
+    // 用户 2026-10："不需要有任何区分'未运行'，因为这对于用户是无意义的信息" ⇒
+    // 只有**活着**（有实时状态）的卡才写状态行；不在本进程时整行不出现（不是写成"未运行"）。
+    if (title.includes('状态：')) assert.match(title, /状态：(运行中|空闲)/, '状态行只能是实时两态')
+    assert.equal(/未运行|已结束/.test(title), false, '不得出现"不在本进程"这类实现细节：\n' + title)
     assert.match(title, /触发指令：/, '带触发指令（家族根给"—"）')
     assert.match(title, /分叉于：/, '带分叉时刻')
     assert.deepEqual(innerTitles(card), [], `${id} 卡内不该再有 title（否则 hover 信息会跳变）`)
