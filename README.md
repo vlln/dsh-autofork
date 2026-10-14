@@ -64,7 +64,7 @@ dsh plugin --profile web add github:vlln/dsh-autofork
 
 ## 两种分叉方式
 
-在侧栏 **插件 → `@vlln/dsh-autofork`** 的包页里选：卡上是两个选项卡，选中的那张标「当前」，右上角标着「即时生效」（改完**立刻生效**，不用重启、没有保存按钮；选择写进 profile 的 `cordis.patch.yml`，重启后仍在）：
+在侧栏 **插件 → `@vlln/dsh-autofork`** 的包页里选：卡上是两个选项卡，选中的那张有品牌色描边与圆点（改完**立刻生效**，不用重启、也没有保存按钮；选择写进 profile 的 `cordis.patch.yml`，重启后仍在）：
 
 | 方式 | 你提交指令时发生什么 |
 |---|---|
