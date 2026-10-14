@@ -132,11 +132,13 @@ test('设置卡片：渲染出两种方式与说明，点「手动分叉」写�
   // 结构：这是"有层次的设置卡"，不是一行标题加一个控件。
   assert.match(text, /触发即分叉/, '每个选项要有短标签（一眼看出区别）')
   assert.match(text, /分不分由你点/)
-  assert.match(text, /即时生效/, '头部要说明保存语义')
-  // **反向钉住**（用户 2026-10 判定那条页脚是噪声）：落盘位置与"要不要点保存"属于**文档**，
-  // 不该占设置界面的版面——界面上只说"即时生效"这一件当下需要知道的事。
-  assert.ok(!text.includes('cordis.patch.yml'), '设置界面不写落盘路径：\n' + text)
-  assert.ok(!text.includes('保存按钮'), '设置界面不解释"没有保存按钮"：\n' + text)
+  // **反向钉住**（用户 2026-10 连着两轮删的就是这类"界面上的文档"）：
+  //  · 落盘位置与"要不要点保存"属于文档（README 已写），不占设置界面；
+  //  · "即时生效"与选中项的"当前"都与交互本身重复（点一下就看得到），一并删；
+  //  · "旧会话留在后台跑完、结果回注"讲的是分叉之后的事，与"何时分叉"这个设置项无关。
+  for (const noise of ['cordis.patch.yml', '保存按钮', '即时生效', '当前', '回注']) {
+    assert.ok(!text.includes(noise), `设置界面不该出现「${noise}」：\n` + text)
+  }
   assert.deepEqual(
     byRole(tree, 'radiogroup').map(group => group.props['aria-label']),
     ['分叉方式'],
@@ -180,8 +182,13 @@ test('设置卡片：已选中项不重复写、summary 视图给一行描述、
   })
   assert.match(bundle.stub.texts(ready).join('\n'), /点「分叉」才分叉/, '手动模式下要讲清分叉入口在哪')
   const current = byRole(ready, 'radio').find(option => option.props['data-mode'] === 'manual')
-  assert.equal(current.props['aria-checked'], 'true', '当前选中的那项要有选中态')
-  assert.ok(bundle.stub.texts(ready).join('\n').includes('当前'), '选中项要挂「当前」标签')
+  // 选中态只用**三处视觉表达**（描边 + 淡品牌底 + 圆点）+ `aria-checked` 语义表达，
+  // 不再另挂一枚「当前」胶囊（用户 2026-10 判定那是重复信息）。
+  assert.equal(current.props['aria-checked'], 'true', '选中项的语义状态')
+  assert.equal(String(current.props.style.border).includes('state-business-primary'), true,
+    '选中项要有品牌色描边')
+  const other = byRole(ready, 'radio').find(option => option.props['data-mode'] === 'auto')
+  assert.equal(other.props['aria-checked'], 'false')
   current.props.onClick()
   await flush()
   assert.deepEqual(bundle.writes, [], '点已经选中的那一项不得产生写入')

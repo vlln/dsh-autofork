@@ -1229,7 +1229,7 @@ window.__ModuleLoader__.load({
         value: 'auto',
         label: '自动分叉',
         tagline: '触发即分叉',
-        hint: '立刻在新会话里开始执行；旧会话留在后台跑完，结果回注过来。',
+        hint: '指令立刻在新会话里开始执行。',
       },
       {
         value: 'manual',
@@ -1329,7 +1329,8 @@ window.__ModuleLoader__.load({
                 color: selected ? TOKEN.accent : TOKEN.labelTertiary,
               },
             }, option.tagline),
-            selected ? chip('current', '当前', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+            // 「当前」那枚胶囊已删（用户 2026-10：冗余——选中态已由描边 + 淡品牌底 + 圆点三处
+            // 同时表达，再挂一枚同样的字只是重复）。
           ]),
           React.createElement('div', {
             key: 'hint',
@@ -1400,12 +1401,9 @@ window.__ModuleLoader__.load({
             style: { fontSize: '13px', fontWeight: '600', lineHeight: '20px', color: TOKEN.labelPrimary },
           }, '分叉方式'),
           React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
-          chip(
-            'save',
-            disabled ? '只读' : '即时生效',
-            disabled ? TOKEN.labelSecondary : TOKEN.accent,
-            disabled ? 'rgba(127, 127, 127, 0.14)' : 'rgba(11, 107, 203, 0.12)',
-          ),
+          // 「即时生效」那枚胶囊已删（用户 2026-10：与交互本身重复——点一下就看到选中态变了，
+          // 不需要再用文字说一遍）。**「只读」保留**：那是异常态，也是"为什么点不动"的唯一线索。
+          disabled ? chip('save', '只读', TOKEN.labelSecondary, 'rgba(127, 127, 127, 0.14)') : null,
         ]),
         // ② 导语：这一节到底在决定什么
         React.createElement('div', {
