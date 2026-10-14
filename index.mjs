@@ -1160,13 +1160,26 @@ export function apply(ctx, config) {
    * @param {string} what 这条消息是什么（`消息` / `中途指令`）。
    * @returns {string} 带发送方前缀的正文。
    */
-  function senderPrefixed(senderId, text, what) {
-    return `分叉会话 ${senderId} 发来${what}：${text}`
+  function senderPrefixed(senderId, text, what, note) {
+    return `分叉会话 ${senderId} 发来${what}${note === undefined ? '' : `（${note}）`}：${text}`
   }
 
-  function agentMessage(senderId, text, marker) {
+  /**
+   * `block:true` 的那条消息要在收方**两个面**上都标出"对方在等回复"（用户 2026-10：
+   * "以防收到消息的会话遗忘回复"）：模型看正文那句括号（`它在等你回复`），人看卡片标题行上的
+   * 「等待回复」胶囊（`source.awaitReply` → `CARD_TITLES` 那张卡）。
+   *
+   * 它描述的是**这条消息的属性**（发送方是以 `block` 发的），不是实时状态——发送方超时放弃后
+   * 胶囊仍在，含义是"这是一条 blocking 提问"。
+   * @param {string} senderId 发送方会话 id。
+   * @param {string} text 正文。
+   * @param {string} marker 卡片标记（`notice`/`digest`/`reply`/`steer`）。
+   * @param {boolean} [awaitReply] 发送方是否在为回复阻塞等待。
+   * @returns {any} 一条 user/message。
+   */
+  function agentMessage(senderId, text, marker, awaitReply) {
     return createUserMessage({
-      content: [{ type: 'text', text: senderPrefixed(senderId, text, '消息') }],
+      content: [{ type: 'text', text: senderPrefixed(senderId, text, '消息', awaitReply === true ? '它在等你回复' : undefined) }],
       /**
        * `autofork` 是本插件自己的**种类标记**（会话格式只校验 `kind` 非空且不是 `plugin`，
        * 其余字段原样保留）：客户端 half 用它认领这三条并画成卡片。
@@ -1177,7 +1190,13 @@ export function apply(ctx, config) {
        * 于是"两张卡 + 用户那条指令 + 只跑一次模型请求"在官方路径下不可能：
        * 卡片 = 本轮开场触发，一轮只能有一张，多一张就多一轮（= 多一次请求）。
        */
-      source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId, autofork: marker },
+      source: {
+        kind: 'agent-message',
+        form: 'relay',
+        senderSessionId: senderId,
+        autofork: marker,
+        ...(awaitReply === true ? { awaitReply: true } : {}),
+      },
     })
   }
 
@@ -2002,7 +2021,7 @@ export function apply(ctx, config) {
         // 直接把 **kind 当显示名**（`label: kind`），于是那一行在界面上叫 `plugin:dsh-autofork`
         // ——机器串当名字（用户 2026-10 指出"这个卡片的名称不太恰当"），而插件没有"注册显示名"
         // 的钩子；切成我们自己的卡片后标题由 `CARD_TITLES` 给（`会话消息`），发送方也能上标题行。
-        const message = agentMessage(callerId, text, 'steer')
+        const message = agentMessage(callerId, text, 'steer', options?.block === true)
         target.steer(message)
         const delivered = `已向 "${targetId}" 投递；它会在当前 step 结束后读到。`
 

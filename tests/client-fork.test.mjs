@@ -424,6 +424,15 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
   assert.ok(steerText.includes('来自 sender'), '折叠行就带发送方（家族里任意一条都可能发来）：\n' + steerText)
   assert.match(css, /\[data-part=sender-inline\]/, '折叠行的发送方有样式规则')
 
+  // `block:true` 的消息要在卡片上标「等待回复」（用户 2026-10："以防收到消息的会话遗忘回复"）：
+  // 标记来自 `source.awaitReply`。它是**消息的属性**（发送方以 block 发的），不是实时状态。
+  steerCard.data.source.awaitReply = true
+  steerContext.state = definition.start(steerContext, { event: steerCard, id: 'm-steer' }, reader)
+  const awaitNode = definition.buildViewNode(steerContext)
+  assert.equal(awaitNode.data.awaitReply, true, 'awaitReply 要带到节点上')
+  const awaitText = bundle.stub.texts(bundle.stub.render({ type: entry.component, props: { node: awaitNode }, children: [] })).join('\n')
+  assert.ok(awaitText.includes('等待回复'), 'block 的消息卡片要挂「等待回复」：\n' + awaitText)
+
   bundle.stop()
 })
 

@@ -2355,16 +2355,19 @@ test('fork_send(block:true)：等到对方那一轮跑完，把它的最后一�
   // 模型只看到 content ⇒ 前缀不放正文里，收方 agent 就不知道该回给谁。
   assert.equal(
     calls.steers[0].content[0].text,
-    `分叉会话 ${headId} 发来消息：请确认你改了什么`,
-    '正文必须自带发送方（模型只看到 content，看不到 source）',
+    `分叉会话 ${headId} 发来消息（它在等你回复）：请确认你改了什么`,
+    '正文必须自带发送方（模型只看到 content），且 block 时要写明对方在等回复',
   )
+  // `block:true` 的标记要落到 source 上（客户端据此在卡片上挂「等待回复」胶囊）——
+  // 用户 2026-10："以防收到消息的会话遗忘回复"。
+  assert.equal(calls.steers[0].source.awaitReply, true, 'block 的消息要带 awaitReply 标记')
   // 并且**走我们自己的卡片形状**：官方对未识别的 kind 直接把 kind 当显示名
   // （`contextProducer` 的 `label: kind`）⇒ 老形状在界面上叫 `plugin:dsh-autofork`（机器串当
   // 名字，用户 2026-10 指出"名称不太恰当"）。切成 `agent-message` + `relay` + 本插件标记后，
   // 标题与发送方都由客户端卡片给。
   assert.deepEqual(calls.steers[0].source, {
-    kind: 'agent-message', form: 'relay', senderSessionId: headId, autofork: 'steer',
-  }, 'steer 必须以卡片形状投递')
+    kind: 'agent-message', form: 'relay', senderSessionId: headId, autofork: 'steer', awaitReply: true,
+  }, 'steer 必须以卡片形状投递，并带上"等回复"标记')
 
   // 对方当时正忙：它先结束了**当前**那一轮才轮到读我们的消息 —— 这一声 idle 不算答复。
   idle(stub, parent)
@@ -2409,11 +2412,18 @@ test('fork_send(block:true)：调用方被中止 → 立刻返回"等待被中�
 
 test('fork_send 默认不阻塞：立刻返回，并明说"它不会自动回复你"', async () => {
   const stub = await forkedFamily()
-  const { tool, head } = stub
+  const { calls, tool, head } = stub
   const result = await tool.execute(
     { sessionId: 'session-parent', text: '改方向' },
     { agent: head, signal: new AbortController().signal },
   )
   assert.equal(result.ok, true)
   assert.match(result.detail, /不会自动回复你/, '必须点明没有回执这件事')
+  // 反向：**不阻塞**的那条不得带"等回复"标记 —— 收方看到它就是纯信息，不该以为有人在等。
+  assert.equal(
+    calls.steers[0].content[0].text,
+    `分叉会话 ${calls.steers[0].source.senderSessionId} 发来消息：改方向`,
+    '非 block 的正文不带"它在等你回复"',
+  )
+  assert.equal(calls.steers[0].source.awaitReply, undefined, '非 block 不带 awaitReply 标记')
 })

@@ -1580,6 +1580,11 @@ window.__ModuleLoader__.load({
       Icon === undefined ? null : React.createElement('span', { 'data-part': 'icon', 'aria-hidden': true },
         React.createElement(Icon, { size: 14 })),
       React.createElement('span', { 'data-part': 'title' }, title),
+      // 「等待回复」：`warn` 色（比中性色更醒目，但明确不是错误），描述这条消息的属性——
+      // 发送方是以 `block:true` 发的；它超时放弃后胶囊仍在（这是历史属性，不是实时状态）。
+      data.awaitReply === true
+        ? chip('await', '等待回复', 'var(--dsw-alias-state-warn-primary, #b8860b)', 'rgba(184, 134, 11, 0.12)')
+        : null,
       // `steer` 的**发送方是会变的**（家族里任意一条都可能发来），所以折叠行就带出来；另外三种卡
       // 的发送方恒定（就是分叉出来的那条），展开后正文里有 `来自会话 …`，不必再占标题行。
       data.marker === 'steer' && sender !== ''
@@ -1646,6 +1651,9 @@ window.__ModuleLoader__.load({
                 time: event.time,
                 marker: event.data.source.autofork,
                 sender: typeof event.data.source.senderSessionId === 'string' ? event.data.source.senderSessionId : '',
+                // 发送方在等回复（`fork_send(block:true)`）⇒ 标题行挂「等待回复」胶囊，
+                // 免得收方会话"收下但不回"（用户 2026-10）。
+                awaitReply: event.data.source.awaitReply === true,
                 text: (event.data.content ?? [])
                   .filter(function (part) { return part?.type === 'text' })
                   .map(function (part) { return part.text })
