@@ -436,6 +436,20 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 `fork_list` 的描述，四处都点明"反向没有自动通道""你在这里的普通回复不会传过去""steer 没有回执"。
 这三句话比机制本身更重要 —— 缺了它们，模型会自己发明一条不存在的通道。
 
+**发送方必须写进正文**（用户 2026-10 问"B 能知道这条来自谁吗"）。查清的结论是"**人看得到、
+模型看不到**"：
+
+- `source`（`{form:'notice', summary:'来自 <id> 的中途指令'}`）只服务**呈现**——客户端据此把行折叠成
+  一行摘要；
+- 模型**永远看不到 `source`**：`deriveEventMessage` 确实把整条 message（含 `source`）交给上游，
+  但 provider 只发 `role` + `content`（这条容易被"投影里有 source"误导，所以写清）；
+- 官方 `dsh-subagent` 的做法同样是**自己拼前缀**（`Agent ${sender.id} sent a message: `，
+  `dsh-subagent/lib/index.js:588`）——宿主不会替插件把 `source` 变成模型可见文字。
+
+所以 `fork_steer` 的正文改成 `分叉会话 <callerId> 发来中途指令：<text>`，与 A→B 那三条回注
+（`… 发来消息：…`）**共用同一条规则**（`senderPrefixed()`，措辞只写一遍）。没有它，收方的 agent
+不知道该回给谁，多成员家族里只能靠 `fork_list` 猜。
+
 **`block` 的实现要点**（`waitForReply`）：
 
 - 判"对方读到了"用的是官方 `Inbox` 的两个待处理表（`nextTurn`/`nextStep`），与手动分叉的动作路由
