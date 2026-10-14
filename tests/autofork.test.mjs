@@ -2344,13 +2344,20 @@ function idle(stub, agent) {
 
 test('fork_steer(block:true)：等到对方那一轮跑完，把它的最后一条回复作为结果返回', async () => {
   const stub = await forkedFamily()
-  const { calls, parent, tool, head } = stub
+  const { calls, parent, tool, head, headId } = stub
   const pending = tool.execute(
     { sessionId: 'session-parent', text: '请确认你改了什么', block: true },
     { agent: head, signal: new AbortController().signal },
   )
   await flush()
   assert.equal(calls.steers.length, 1, '先投递（不等）')
+  // 正文必须自带发送方（用户 2026-10 问"B 能知道这条来自谁吗"）：`source` 只服务呈现，
+  // 模型只看到 content ⇒ 前缀不放正文里，收方 agent 就不知道该回给谁。
+  assert.equal(
+    calls.steers[0].content[0].text,
+    `分叉会话 ${headId} 发来中途指令：请确认你改了什么`,
+    '正文必须自带发送方（模型只看到 content，看不到 source）',
+  )
 
   // 对方当时正忙：它先结束了**当前**那一轮才轮到读我们的消息 —— 这一声 idle 不算答复。
   idle(stub, parent)

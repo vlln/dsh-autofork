@@ -1146,9 +1146,27 @@ export function apply(ctx, config) {
    * @param {'notice' | 'digest' | 'reply'} marker 本插件自己的消息种类标记。
    * @returns {any} 可直接 append / 交给 `send` 的消息。
    */
+  /**
+   * 给一条**跨会话**消息的正文加上发送方前缀。
+   *
+   * ⚠️ **必须放进正文，不能只放 `source`**（用户 2026-10 问"B 能知道这条来自谁吗"）：
+   * `source` 只服务**呈现**（客户端据此画卡片/折叠行），**模型看不到它**——
+   * `deriveEventMessage` 虽然把整条 message（含 `source`）交给上游，但 provider 只发
+   * `role` + `content`；官方 `dsh-subagent` 也是自己把 "Agent X sent a message: " **拼进 content**
+   * （`dsh-subagent/lib/index.js:588`）。不放正文，收方的 agent 就不知道该回给谁——
+   * 多成员家族里只能靠 `fork_list` 猜。
+   * @param {string} senderId 发送方会话 id。
+   * @param {string} text 正文。
+   * @param {string} what 这条消息是什么（`消息` / `中途指令`）。
+   * @returns {string} 带发送方前缀的正文。
+   */
+  function senderPrefixed(senderId, text, what) {
+    return `分叉会话 ${senderId} 发来${what}：${text}`
+  }
+
   function agentMessage(senderId, text, marker) {
     return createUserMessage({
-      content: [{ type: 'text', text: `分叉会话 ${senderId} 发来消息：${text}` }],
+      content: [{ type: 'text', text: senderPrefixed(senderId, text, '消息') }],
       /**
        * `autofork` 是本插件自己的**种类标记**（会话格式只校验 `kind` 非空且不是 `plugin`，
        * 其余字段原样保留）：客户端 half 用它认领这三条并画成卡片。
@@ -1979,7 +1997,9 @@ export function apply(ctx, config) {
         }
         const target = ctx.agents.get(targetId)
         if (target === undefined) return { ok: false, detail: `会话 "${targetId}" 已不在运行。` }
-        const message = contextMessage(text, `来自 ${callerId} 的中途指令`)
+        // 正文带发送方（与回注那三条同一规则，见 `senderPrefixed`）；`summary` 只管**呈现**，
+        // 折叠行上写的是 `来自 <id> 的中途指令`——人是两面都能看到，模型只有正文。
+        const message = contextMessage(senderPrefixed(callerId, text, '中途指令'), `来自 ${callerId} 的中途指令`)
         target.steer(message)
         const delivered = `已向 "${targetId}" 投递；它会在当前 step 结束后读到。`
 
