@@ -433,6 +433,41 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
   const awaitText = bundle.stub.texts(bundle.stub.render({ type: entry.component, props: { node: awaitNode }, children: [] })).join('\n')
   assert.ok(awaitText.includes('等待回复'), 'block 的消息卡片要挂「等待回复」：\n' + awaitText)
 
+  // ── 卡片正文的**原则**（用户 2026-10 定）────────────────────────────────────────────
+  // ① 正文只能是**模型看到的内容**（至多剥掉"插件写进正文、而标题行已表达过"的前缀）；
+  // ② **绝不在呈现层发明模型看不到的句子**（例："这条通知触发了本轮回复。"——对使用者是噪声、
+  //    对模型不存在）。下面两条把它钉住：正文必须是 `node.data.text` 的**子串**，且不得含那句噪声。
+  const partOf = (tree, part) => {
+    let found = null
+    const walk = (node) => {
+      if (node === null || typeof node === 'string' || found !== null) return
+      if (Array.isArray(node)) { node.forEach(walk); return }
+      if (node.props?.['data-part'] === part) { found = node; return }
+      walk(node.children)
+    }
+    walk(tree)
+    return found
+  }
+  const bodyOf = (tree) => bundle.stub.texts(partOf(tree, 'content')).join('')
+
+  // ① 前缀被剥掉（卡片标题行已经写了发送方与「等待回复」）
+  // 卡片的第一个 `useState` 是"展开"，桩里只能从**初始值**这一侧进（`setState` 是 no-op）。
+  const expanded = (node) => bundle.stub.render(
+    { type: entry.component, props: { node }, children: [] }, { states: [true] })
+  const strippedTree = expanded(awaitNode)
+  assert.equal(bodyOf(strippedTree), '请报告进度', '正文要剥掉插件自己写的前缀')
+  // ② 形状不匹配就**原样**显示（呈现层不做模糊处理）
+  const bareNode = { ...awaitNode, data: { ...awaitNode.data, text: '裸正文：不做任何切分' } }
+  const bareTree = expanded(bareNode)
+  assert.equal(bodyOf(bareTree), '裸正文：不做任何切分', '不匹配前缀时原样显示')
+  // ③ 任何情况下正文 ⊆ 模型可见文本，且不含模型看不到的句子
+  for (const tree of [strippedTree, bareTree, folded]) {
+    const body = bodyOf(tree)
+    const source = tree === folded ? node.data.text : (tree === strippedTree ? awaitNode.data.text : bareNode.data.text)
+    assert.ok(source.includes(body), '正文必须是模型可见文本的子串：\n' + body)
+    assert.ok(!body.includes('触发了本轮回复'), '不得混入模型看不到的解释性文案：\n' + body)
+  }
+
   bundle.stop()
 })
 

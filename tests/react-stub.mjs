@@ -46,11 +46,19 @@ function makeReact() {
     useEffect() {},
   }
 
+  /**
+   * 一次性初始 hook 槽：`render(node, {states:[…]})` 传给**第一个**被求值的函数组件，
+   * 用来测"初始 state 不是它自己那个默认值"的分支（例如卡片的**展开态**——真实 React 里
+   * 靠点击切换，而桩的 `setState` 是 no-op，所以只能从初始值这一侧进）。
+   */
+  let pendingStore
+
   /** 进入一个组件时给它一套**独立**的 hook 槽（组件之间不能互相污染）。 */
   function withHooks(fn) {
     const savedStore = store
     const savedCursor = cursor
-    store = []
+    store = pendingStore === undefined ? [] : pendingStore
+    pendingStore = undefined
     cursor = 0
     try {
       return fn()
@@ -65,7 +73,8 @@ function makeReact() {
    * @param {any} node 元素。
    * @returns {any} 展开后的树。
    */
-  function render(node) {
+  function render(node, options) {
+    if (options?.states !== undefined && pendingStore === undefined) pendingStore = options.states
     if (node === null || node === undefined || node === false || node === true) return null
     if (typeof node === 'string' || typeof node === 'number') return String(node)
     if (Array.isArray(node)) return node.map(render).filter(child => child !== null)

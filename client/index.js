@@ -720,6 +720,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 卡片**正文**的呈现文本：剥掉插件自己写进模型正文的那段已知前缀。
+     *
+     * 前缀形状由宿主 half 的 `senderPrefixed()` 决定（`分叉会话 <id> 发来消息（它在等你回复）：`），
+     * 而卡片**已经**在标题行写了发送方与「等待回复」胶囊 ⇒ 正文里再来一遍是重复（用户 2026-10）。
+     *
+     * ⚠️ **只在形状完全匹配时才剥**，不匹配就原样显示：正文是**模型可见文本**，呈现层不许对它做
+     * 模糊处理（猜着切就会把正文本身切掉）。
+     * @param {string} text 模型可见正文。
+     * @returns {string} 呈现用正文。
+     */
+    function cardBody(text) {
+      var match = /^分叉会话\s+\S+\s+发来(?:消息|中途指令)(（[^）]*）)?：/.exec(text)
+      return match === null ? text : text.slice(match[0].length)
+    }
+
+    /**
      * 树状图上的一张节点卡。
      *
      * 一张卡回答三件事（与列表版一致，只是换了载体）：**这是哪条会话**（徽章 + 名字）、
@@ -1558,6 +1574,15 @@ window.__ModuleLoader__.load({
      * @param {any} props 槽位注入的 props（`node` 是本模块定义产出的节点）。
      * @returns {any} React 元素。
      */
+    /**
+     * **原则（用户 2026-10 定下，改动这张卡前先读）**：卡片正文**只能是模型看到的内容**——
+     * 至多剥掉"插件自己写进正文、而卡片标题行已经表达过"的前缀（{@link cardBody}）；
+     * **绝不在呈现层发明模型看不到的句子**（例如"这条通知触发了本轮回复。"这类解释性文案：
+     * 对使用者是噪声，对模型不存在，两边都不讨好）。要让人看见的信息，要么进模型正文
+     * （像 `block` 的"它在等你回复"），要么是**数据派生**的标签（标题 / 发送方 / 时间 / 状态）。
+     * @param {any} props 渲染输入。
+     * @returns {any} React 元素。
+     */
     function AutoforkCardView(props) {
       var node = props?.node
       var data = node?.data ?? {}
@@ -1594,7 +1619,8 @@ window.__ModuleLoader__.load({
       Chevron === undefined ? null : React.createElement(Chevron, { 'data-part': 'chevron', size: 12 }))
       var body = open === false ? null : React.createElement('div', { 'data-part': 'body' },
         React.createElement('p', { 'data-part': 'sender' }, '来自会话 ' + (data.sender === '' ? '未知' : data.sender)),
-        React.createElement('div', { 'data-part': 'content' }, data.text))
+        // 正文 = 模型可见文本（剥掉卡片已表达过的前缀，见 `cardBody` 与上面的原则）。
+        React.createElement('div', { 'data-part': 'content' }, cardBody(typeof data.text === 'string' ? data.text : '')))
       return React.createElement('section', {
         [CARD_ATTR]: data.marker,
         'data-open': open ? '' : undefined,
