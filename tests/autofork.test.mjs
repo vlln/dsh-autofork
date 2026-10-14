@@ -1466,17 +1466,38 @@ test('命名：盘上已有 ⑂1 → 新分叉是 ⑂2（按基名接号、不�
   assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂2 修 GUI 卡顿' }])
 })
 
-test('命名：别的基名占用的序号不算进来', async () => {
+test('命名：序号按**家族**计数 —— 另一个家族（哪怕同名）编到几号都不算进来', async () => {
+  // 用户 2026-10 报的"⑂n 序号不统一"的根因之一：序号曾按**基名**取 max，于是**同名的两个家族
+  // 共用一条序列**（实测：`-block-e2e` 拿 ⑂3…⑂16，同名的 `-block-live` 拿 ⑂1,⑂2）。
+  // 这里另一个家族的基名与本次**完全相同**，但根不同 ⇒ 它的 ⑂5 不该影响本家族。
   const { ctx, calls, emitInsert } = harness({
     titles: { 'session-parent': '修 GUI 卡顿' },
-    lineageEdges: { 'session-other': edge('session-x', 'session-x', 5, 1000, '另一件事') },
+    lineageEdges: { 'session-other': edge('session-x', 'session-x', 5, 1000, '修 GUI 卡顿') },
   })
   applyChain(ctx, undefined)
   emitInsert(userMessage())
   await flush()
   const headId = calls.agentsCreate[0].sessionId
   assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂1 修 GUI 卡顿' }],
-    '另一个家族编到几号与本家族无关')
+    '同名但不同家族 ⇒ 序号各算各的（按 rootId，不按基名）')
+})
+
+test('命名：别的进程刚写的边 —— 分配前强制重读，序号不撞号', async () => {
+  // 用户 2026-10 实测的撞号现场：本进程快照里最大 ⑂2，而盘上已经有别的进程写的 ⑂3
+  // ⇒ 不重读就会再分配一次 ⑂3。这里模拟"域在 open 之后又多了边"。
+  const options = {
+    titles: { 'session-parent': '修 GUI 卡顿' },
+    lineageEdges: { 'session-old-head': edge('session-parent', 'session-parent', 2, 1000) },
+  }
+  const { ctx, calls, emitInsert } = harness(options)
+  applyChain(ctx, undefined)
+  // 别的进程写了一条 ⑂3（同一个家族）
+  options.lineageEdges['session-other-process'] = edge('session-parent', 'session-parent', 3, 2000)
+  emitInsert(userMessage())
+  await flush()
+  const headId = calls.agentsCreate[0].sessionId
+  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂4 修 GUI 卡顿' }],
+    '必须看到别的进程写的 ⑂3，于是本次是 ⑂4（否则会重号）')
 })
 
 test('命名：基名从父标题里剥掉标记 —— 不会累积成 `⑂1 ⑂2 …`', async () => {
@@ -1545,7 +1566,10 @@ test('分叉时把血缘边写进官方存储域（这是重启后关系不丢�
   emitInsert(userMessage())
   await flush()
 
-  assert.deepEqual(calls.lineageOpens, ['autofork_lineage'], '域名要与 spec 一致')
+  // 现在至少有两次：启动装载 + **分配序号前的强制重读**（见 `refreshLineage(true)`）。
+  assert.ok(calls.lineageOpens.length >= 2, `至少装载 + 命名前强刷两次：${calls.lineageOpens.join(',')}`)
+  assert.equal(new Set(calls.lineageOpens).size, 1, '两次都必须是同一个域名（与 spec 一致）')
+  assert.equal(calls.lineageOpens[0], 'autofork_lineage')
   assert.equal(calls.lineageWrites.length, 1)
   const { headId, edge: written } = calls.lineageWrites[0]
   assert.equal(headId, calls.agentsCreate[0].sessionId)

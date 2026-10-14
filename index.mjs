@@ -332,6 +332,29 @@ export function apply(ctx, config) {
    * 持久化下来的边（装载是一次表扫描，几个毫秒）。
    * @returns {Promise<boolean>} 是否可用。
    */
+  /** 相邻两次重读的最小间隔（health 每 2s 轮询一次；每次重读 = 一次全表读，别更密）。 */
+  const LINEAGE_REFRESH_MIN_MS = 2000
+
+  /** 上次重读的时刻（0 = 还没读过）。 */
+  let lastRefreshAt = 0
+
+  /**
+   * 读路径前把持久化层重读一遍（**节流**）；写路径（分配序号）**强制**重读。
+   *
+   * 见 `src/lineage.mjs` 的 `refresh()`：域只在 `open` 时装一次，不重读就看不见别的进程做的分叉。
+   * @param {boolean} [force] 忽略节流（分配序号前必须用）。
+   * @returns {Promise<void>} 完成。
+   */
+  async function refreshLineage(force = false) {
+    if (lineage === undefined) return
+    // **先等首次装载**（`ready`）：`refresh()` 在域还没 open 时会直接返回 false，不先等就会让
+    // 启动后第一次读看到空血缘（这一句以前散在每个调用点，现在收在一处）。
+    await settleLineage()
+    if (force !== true && Date.now() - lastRefreshAt < LINEAGE_REFRESH_MIN_MS) return
+    lastRefreshAt = Date.now()
+    await lineage.refresh()
+  }
+
   async function settleLineage() {
     if (lineage === undefined) return false
     try {
@@ -539,14 +562,16 @@ export function apply(ctx, config) {
    * @param {string} base 家族基名。
    * @returns {number} 下一个序号（从 1 起）。
    */
-  function nextBranchOrdinal(base) {
-    let max = lineage?.ordinalOf?.(base) ?? 0
+  function nextBranchOrdinal(rootId, base) {
+    // 序号按**家族根**计数（不是按基名——同名的两个家族曾共用一条序列，用户 2026-10 报的
+    // "序号不统一"就是它）。`base` 只用于显示与日志。
+    let max = lineage?.ordinalOf?.(rootId) ?? 0
     for (const record of recordByHead.values()) {
-      if (record.titleBase === base && typeof record.titleOrdinal === 'number') {
+      if (record.rootId === rootId && typeof record.titleOrdinal === 'number') {
         max = Math.max(max, record.titleOrdinal)
       }
     }
-    debug('title.ordinal', { base, max, next: max + 1, lineage: lineage?.size?.() ?? 0 })
+    debug('title.ordinal', { root: rootId, base, max, next: max + 1, lineage: lineage?.size?.() ?? 0 })
     return max + 1
   }
 
@@ -579,7 +604,10 @@ export function apply(ctx, config) {
     const base = stripBranchMark(titleOfLive(rootId), mark)
       ?? stripBranchMark(titleOfLive(workerSession.id), mark)
       ?? `会话 ${shortSessionId(rootId)}`
-    const ordinal = nextBranchOrdinal(base)
+    // 分配序号前**强制重读**血缘：否则本进程会用陈旧快照算 max+1，撞上别的进程刚分配的号
+    // （用户实测：盘上已有 ⑂9，而本进程快照最大只到 ⑂8 ⇒ 下一次分叉又叫 ⑂9）。
+    await refreshLineage(true)
+    const ordinal = nextBranchOrdinal(rootId, base)
     const title = `${mark}${ordinal} ${base}`
     try {
       sessionTitleApi.rename(headSession, title)
@@ -2061,12 +2089,13 @@ export function apply(ctx, config) {
       // 读取家族的路径先等血缘域装载完一次，这样**重启后**也能看到持久化下来的关系
       // （内存记录是空的，但边还在）。
       related: async (callerId) => {
-        await settleLineage()
+        // 读路径**节流刷新**：别的进程刚做的分叉也要能列出来（页签/工具都走这里）。
+        await refreshLineage()
         return relatedSessions(callerId)
       },
       steerCeilingMs: STEER_BLOCK_CEILING_MS,
       steer: async (callerId, targetId, text, options) => {
-        await settleLineage()
+        await refreshLineage()
         if (!isFamilyMember(callerId, targetId)) {
           return { ok: false, detail: `"${targetId}" 不在你的家族里；先用 fork_list 查看。` }
         }
@@ -2119,7 +2148,7 @@ export function apply(ctx, config) {
         }
       },
       cancel: async (callerId, targetId, keepInbox) => {
-        await settleLineage()
+        await refreshLineage()
         if (!isFamilyMember(callerId, targetId)) {
           return { ok: false, detail: `"${targetId}" 不在你的家族里；先用 fork_list 查看。` }
         }
@@ -2164,9 +2193,9 @@ export function apply(ctx, config) {
         const ack = query.get('ack')
         const note = query.get('note')
         pruneRecords()
-        // **重启后也要看得到关系**：先等一次血缘域装载（一次性表扫描，毫秒级），
-        // 之后这次请求里的同步读取（`familyNodes` / `driverView`）就都能看见持久化的边。
-        await settleLineage()
+        // **重启后也要看得到关系**，而且**别的进程**刚做的分叉也要看到：先装载 + 节流重读一次
+        // （见 `refreshLineage`），之后这次请求里的同步读取（`familyNodes` / `driverView`）才是新鲜的。
+        await refreshLineage()
 
         // 客户端回报（开放诊断通道）：客户端 half 跑在浏览器里，没有它这里就是纯黑盒。
         if (note !== null) debug('client.note', { note })

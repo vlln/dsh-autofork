@@ -143,6 +143,9 @@ export function createLineage(facility, debug) {
     list.sort((left, right) => (edges.get(left)?.createdAt ?? 0) - (edges.get(right)?.createdAt ?? 0))
   }
 
+  /** 并发合并：同一时刻只跑一次重读（health 轮询 + 工具调用 + 命名前强刷都会调它）。 */
+  let refreshing
+
   const ready = (async () => {
     if (facility === undefined || typeof facility.open !== 'function') {
       debug('lineage.no-facility')
@@ -162,6 +165,38 @@ export function createLineage(facility, debug) {
 
   return {
     ready,
+
+    /**
+     * **重读持久化层**，把别的进程写的边并进来。
+     *
+     * 为什么需要：域在 `ready` 里只装一次，而官方 `dsh-storage-json` 后端也是在 `open` 时把整张表
+     * 读进内存 Map（domain API 只暴露 `open`/`close`/`table`，**没有"重读"的口子**）⇒ **别的进程**
+     * 做的分叉在本进程里永远看不见（用户实测：盘上 14 条边、页签只有 7 个节点，恰好是启动那一刻
+     * 的前 6 条）。⇒ 靠 `close()` + 重新 `open()` + 重建索引：不猜路径、不自己读文件。
+     *
+     * 合并语义：持久化层是权威，但**内存里已记下、尚未落盘的边保留**（落盘失败时它们只存在于内存，
+     * `index()` 本身是"并集"式的，所以重读不会把它们抹掉）。
+     * @returns {Promise<boolean>} 是否重读成功（失败只降级，绝不影响分叉本体）。
+     */
+    async refresh() {
+      if (facility === undefined || domain === undefined) return false
+      if (refreshing !== undefined) return refreshing
+      refreshing = (async () => {
+        try {
+          await domain?.close?.()
+          domain = await facility.open(lineageDomainSpec)
+          for (const [headId, edge] of domain.table(LINEAGE_TABLE).entries()) index(headId, edge)
+          debug('lineage.refreshed', { edges: edges.size, workers: headsByWorker.size })
+          return true
+        } catch (error) {
+          debug('lineage.refresh-failed', { error: String(error) })
+          return false
+        } finally {
+          refreshing = undefined
+        }
+      })()
+      return refreshing
+    },
 
     /**
      * @param {string} headId 会话 id。
@@ -206,10 +241,20 @@ export function createLineage(facility, debug) {
      * @param {string} base 命名基名。
      * @returns {number} 最大序号（没有则 0）。
      */
-    ordinalOf(base) {
+    /**
+     * 某个**家族**已经用过的最大序号。
+     *
+     * 曾经按 `base`（家族根的标题字符串）算——那让**同名的两个家族共享一条序号序列**（用户实测：
+     * `-block-e2e` 拿到 `⑂3…⑂16`，而同名的 `-block-live` 拿 `⑂1,⑂2`）⇒ "第 n 次分叉"与"这个家族的
+     * 第 n 个成员"对不上（用户 2026-10 报的"序号不统一"）。现在按家族根（`rootId`）算，
+     * 序号语义与显示（`⑂n <根名>`）对齐；盘上已有的边序号一格不动，所以迁移是单调的。
+     * @param {string} rootId 家族根会话 id。
+     * @returns {number} 该家族用过的最大序号（没有则为 0）。
+     */
+    ordinalOf(rootId) {
       let max = 0
       for (const edge of edges.values()) {
-        if (edge.base === base) max = Math.max(max, edge.ordinal)
+        if (edge.rootId === rootId) max = Math.max(max, edge.ordinal)
       }
       return max
     },
