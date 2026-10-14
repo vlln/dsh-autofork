@@ -1220,10 +1220,123 @@ window.__ModuleLoader__.load({
         })
     }
 
-    /** 两种方式的说明文案（卡片下方一行）。 */
-    var MODE_HINT = {
-      auto: '忙的时候你提交的指令会立刻在新会话里开始执行（本插件的原始行为）。',
-      manual: '忙的时候你提交的指令照常排队；在队列那条指令上点「分叉」才分叉。',
+    /**
+     * 两种方式的**选项卡文案**：每个选项三行——名字（`自动分叉`）、短标签（`触发即分叉`）、
+     * 一句话说明。短标签与说明分层给：前者用来"一眼看出区别"，后者用来"搞清细节"。
+     */
+    var MODE_CARDS = [
+      {
+        value: 'auto',
+        label: '自动分叉',
+        tagline: '触发即分叉',
+        hint: '忙的时候你提交的指令立刻在新会话里开始执行，旧会话留在后台把活干完、结果回注过来。',
+      },
+      {
+        value: 'manual',
+        label: '手动分叉',
+        tagline: '分不分由你点',
+        hint: '指令照常排队；在队列那条指令右侧点「分叉」才分叉，什么时候分由你决定。',
+      },
+    ]
+
+    /**
+     * 一个分叉方式**选项卡**（`role="radio"`）。
+     *
+     * 选中态由**三处同时**表达（描边品牌色 + 淡品牌底 + 圆点填充），未选中只留 1px 中性描边——
+     * 与树卡的选中药同一种语言（不靠"多一个边框"这种单点差异，色觉差异也能看出来）。
+     */
+    function ModeOption(props) {
+      var option = props.option
+      var selected = props.selected === true
+      var disabled = props.disabled === true
+      var hoverPair = React.useState(false)
+      var hover = hoverPair[0]
+      var setHover = hoverPair[1]
+      var choose = function () { if (!disabled && !selected) props.onChoose(option.value) }
+      return React.createElement('div', {
+        role: 'radio',
+        'aria-checked': selected ? 'true' : 'false',
+        'aria-disabled': disabled ? 'true' : undefined,
+        // 稳定锚：渲染自证与浏览器排障都按它认这一个选项（同树卡的 `data-session-id`）。
+        'data-mode': option.value,
+        tabIndex: disabled ? undefined : 0,
+        onClick: choose,
+        onKeyDown: function (event) {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          choose()
+        },
+        onMouseEnter: function () { setHover(true) },
+        onMouseLeave: function () { setHover(false) },
+        style: {
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '10px',
+          padding: '12px 14px',
+          boxSizing: 'border-box',
+          borderRadius: '10px',
+          cursor: disabled ? 'not-allowed' : (selected ? 'default' : 'pointer'),
+          border: '1px solid ' + (selected
+            ? TOKEN.accent
+            : 'var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.25))'),
+          background: selected
+            ? 'rgba(11, 107, 203, 0.08)'
+            : (hover && !disabled ? TOKEN.hover : 'transparent'),
+          opacity: disabled ? 0.55 : 1,
+          transition: 'border-color 120ms ease, background 120ms ease',
+        },
+      }, [
+        React.createElement('span', {
+          key: 'dot',
+          style: {
+            flex: 'none',
+            width: '14px',
+            height: '14px',
+            marginTop: '2px',
+            borderRadius: '999px',
+            display: 'grid',
+            placeItems: 'center',
+            border: '1.5px solid ' + (selected
+              ? TOKEN.accent
+              : 'var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.45))'),
+          },
+        }, selected ? React.createElement('span', {
+          key: 'fill',
+          style: { width: '6px', height: '6px', borderRadius: '999px', background: TOKEN.accent },
+        }) : null),
+        React.createElement('div', {
+          key: 'body',
+          style: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: '0' },
+        }, [
+          React.createElement('div', {
+            key: 'top',
+            style: { display: 'flex', alignItems: 'baseline', gap: '8px', minWidth: '0', flexWrap: 'wrap' },
+          }, [
+            React.createElement('span', {
+              key: 'label',
+              style: {
+                fontSize: '13px',
+                fontWeight: selected ? '600' : '500',
+                lineHeight: '18px',
+                color: TOKEN.labelPrimary,
+              },
+            }, option.label),
+            React.createElement('span', {
+              key: 'tagline',
+              style: {
+                fontSize: '11.5px',
+                lineHeight: '18px',
+                color: selected ? TOKEN.accent : TOKEN.labelTertiary,
+              },
+            }, option.tagline),
+            selected ? chip('current', '当前', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+          ]),
+          React.createElement('div', {
+            key: 'hint',
+            style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelSecondary },
+          }, option.hint),
+        ]),
+      ])
     }
 
     /**
@@ -1240,12 +1353,16 @@ window.__ModuleLoader__.load({
       var failed = pair[0]
       var setFailed = pair[1]
 
-      if (props.view === 'summary') return '自动分叉 / 手动分叉'
       if (state === null || state === undefined || state.status === 'unavailable') return null
 
       var current = state.value !== null && state.value !== undefined && state.value.forkMode === 'manual'
         ? 'manual'
         : 'auto'
+      // `summary` 视图：官方包页那行摘要——直接报**当前值**，比罗列两个选项名有用。
+      if (props.view === 'summary') {
+        return '当前：' + (current === 'manual' ? '手动分叉' : '自动分叉')
+      }
+
       var disabled = state.writable !== true
 
       var choose = function (value) {
@@ -1257,46 +1374,81 @@ window.__ModuleLoader__.load({
         })
       }
 
-      var control = typeof primitives.SegmentedControl === 'function'
-        ? React.createElement(primitives.SegmentedControl, {
-          id: 'dsh-autofork-mode',
-          label: '分叉方式',
-          value: current,
-          disabled: disabled,
-          options: [
-            { value: 'auto', label: '自动分叉' },
-            { value: 'manual', label: '手动分叉' },
-          ],
-          onChange: choose,
-        })
-        : React.createElement('div', { style: { display: 'flex', gap: '8px' } },
-          ['auto', 'manual'].map(function (value) {
-            return React.createElement('button', {
-              key: value,
-              type: 'button',
-              className: 'dsh-autofork-fork',
-              'aria-pressed': current === value,
-              disabled: disabled,
-              onClick: function () { choose(value) },
-            }, value === 'auto' ? '自动分叉' : '手动分叉')
-          }))
-
       return React.createElement('div', {
         'data-dsh-autofork-settings': '',
-        style: { display: 'flex', flexDirection: 'column', gap: '4px', padding: '4px 0' },
-      },
-      React.createElement('span', {
-        style: { fontSize: '13px', fontWeight: '500', lineHeight: '20px', color: TOKEN.labelPrimary },
-      }, '分叉方式'),
-      control,
-      React.createElement('span', {
-        style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelTertiary },
-      }, MODE_HINT[current]),
-      failed ? React.createElement('span', {
-        role: 'status',
-        style: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary, #c62828)' },
-      }, '刚才的改动未被接受，已回读当前值。') : null,
-      )
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+          // 与「分叉」页签的卡片同一套语言：1px 中性描边 + 12px 圆角 + 一层抬升的表面。
+          // 限一下宽：两列选项卡在超宽屏上拉成两条长行会很难读。
+          maxWidth: '720px',
+          padding: '14px 16px',
+          boxSizing: 'border-box',
+          border: '1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.25))',
+          borderRadius: '12px',
+          background: 'var(--dsw-alias-bg-layer-2, transparent)',
+        },
+      }, [
+        // ① 头部：标题 + 右侧**保存语义**胶囊（即时生效 / 只读——这是使用者最先想确认的事）
+        React.createElement('div', {
+          key: 'head',
+          style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0' },
+        }, [
+          React.createElement('span', {
+            key: 'title',
+            style: { fontSize: '13px', fontWeight: '600', lineHeight: '20px', color: TOKEN.labelPrimary },
+          }, '分叉方式'),
+          React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
+          chip(
+            'save',
+            disabled ? '只读' : '改动即时生效',
+            disabled ? TOKEN.labelSecondary : TOKEN.accent,
+            disabled ? 'rgba(127, 127, 127, 0.14)' : 'rgba(11, 107, 203, 0.12)',
+          ),
+        ]),
+        // ② 导语：这一节到底在决定什么
+        React.createElement('div', {
+          key: 'intro',
+          style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelSecondary },
+        }, 'agent 正忙时，你新提交的指令是立刻换一条会话来回答你，还是先排队、由你决定什么时候分叉。'),
+        // ③ 选项卡：两列（窄了自动折成一列）
+        React.createElement('div', {
+          key: 'options',
+          role: 'radiogroup',
+          'aria-label': '分叉方式',
+          style: {
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+            gap: '10px',
+          },
+        }, MODE_CARDS.map(function (option) {
+          return React.createElement(ModeOption, {
+            key: option.value,
+            option: option,
+            selected: current === option.value,
+            disabled: disabled,
+            onChoose: choose,
+          })
+        })),
+        // ④ 页脚小字：权威落点与生效方式（"改了会不会丢"这类问题在这里一次答掉）
+        React.createElement('div', {
+          key: 'foot',
+          style: { fontSize: '11.5px', lineHeight: '17px', color: TOKEN.labelTertiary },
+        }, '改动即时写入 profile 的 cordis.patch.yml，重启后仍然有效（本页没有保存按钮）。'),
+        // ⑤ 写入被拒：与触发指令的引用块同一种"左侧竖线"记号，错误态也用同一套
+        failed ? React.createElement('div', {
+          key: 'failed',
+          role: 'status',
+          style: {
+            fontSize: '12px',
+            lineHeight: '18px',
+            color: 'var(--dsw-alias-state-error-primary, #c62828)',
+            borderLeft: '2px solid var(--dsw-alias-state-error-primary, #c62828)',
+            paddingLeft: '8px',
+          },
+        }, '刚才的改动未被接受，已回读当前值。') : null,
+      ])
     }
 
     /**

@@ -63,6 +63,24 @@ function buttonsOf(node, out = []) {
   return out
 }
 
+/**
+ * 按 `role` 收集元素（设置卡的选项是 `role="radio"` 的自绘选项卡，不是 `<button>`）。
+ * @param {any} node 元素树。
+ * @param {string} role 期望的 role。
+ * @param {any[]} [out] 输出数组。
+ * @returns {any[]} 命中的元素。
+ */
+function byRole(node, role, out = []) {
+  if (node === null || typeof node === 'string') return out
+  if (Array.isArray(node)) {
+    node.forEach(child => byRole(child, role, out))
+    return out
+  }
+  if (node.props?.role === role) out.push(node)
+  byRole(node.children, role, out)
+  return out
+}
+
 /** 等 fetch 的 promise 链跑完。 */
 async function flush() {
   for (let index = 0; index < 6; index += 1) await new Promise(resolve => setImmediate(resolve))
@@ -111,8 +129,22 @@ test('设置卡片：渲染出两种方式与说明，点「手动分叉」写�
   assert.match(text, /手动分叉/)
   assert.match(text, /立刻在新会话里开始执行/, '卡片必须说清当前这种方式是怎么运作的')
 
-  const manual = buttonsOf(tree).find(button => button.children.some(child => child === '手动分叉'))
-  assert.ok(manual !== undefined, '必须有「手动分叉」这个选项（拿不到官方 SegmentedControl 时的自绘回退）')
+  // 结构：这是"有层次的设置卡"，不是一行标题加一个控件。
+  assert.match(text, /触发即分叉/, '每个选项要有短标签（一眼看出区别）')
+  assert.match(text, /分不分由你点/)
+  assert.match(text, /改动即时生效/, '头部要说明保存语义')
+  assert.match(text, /cordis\.patch\.yml/, '页脚要说明写入位置与生效方式')
+  assert.deepEqual(
+    byRole(tree, 'radiogroup').map(group => group.props['aria-label']),
+    ['分叉方式'],
+    '两个选项要包在带名字的 radiogroup 里',
+  )
+  const options = byRole(tree, 'radio')
+  assert.deepEqual(options.map(option => option.props['data-mode']), ['auto', 'manual'])
+
+  const manual = options.find(option => option.props['data-mode'] === 'manual')
+  assert.ok(manual !== undefined, '必须有「手动分叉」这个选项')
+  assert.equal(manual.props['aria-checked'], 'false', '未选中项 aria-checked=false')
   manual.props.onClick()
   await flush()
 
@@ -136,7 +168,7 @@ test('设置卡片：已选中项不重复写、summary 视图给一行描述、
     props: { view: 'summary', ...hookProps },
     children: [],
   })
-  assert.equal(summary, '自动分叉 / 手动分叉')
+  assert.equal(summary, '当前：手动分叉', 'summary 视图直接报当前值，比罗列两个选项名有用')
 
   const ready = bundle.stub.render({
     type: entry.component,
@@ -144,8 +176,9 @@ test('设置卡片：已选中项不重复写、summary 视图给一行描述、
     children: [],
   })
   assert.match(bundle.stub.texts(ready).join('\n'), /点「分叉」才分叉/, '手动模式下要讲清分叉入口在哪')
-  const current = buttonsOf(ready).find(button => button.children.some(child => child === '手动分叉'))
-  assert.equal(current.props['aria-pressed'], true, '当前选中的那项要有选中态')
+  const current = byRole(ready, 'radio').find(option => option.props['data-mode'] === 'manual')
+  assert.equal(current.props['aria-checked'], 'true', '当前选中的那项要有选中态')
+  assert.ok(bundle.stub.texts(ready).join('\n').includes('当前'), '选中项要挂「当前」标签')
   current.props.onClick()
   await flush()
   assert.deepEqual(bundle.writes, [], '点已经选中的那一项不得产生写入')
