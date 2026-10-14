@@ -1933,13 +1933,9 @@ window.__ModuleLoader__.load({
           // 压缩到看不清从属关系就白换了。
           style: { marginTop: '8px', overflowX: 'auto', overscrollBehaviorX: 'contain' },
         }, canvas))
-        if (nodes.length === 1) {
-          children.push(React.createElement('div', {
-            key: 'empty',
-            style: Object.assign({ marginTop: '10px', maxWidth: '52ch' }, COLUMN_STYLE, HINT_STYLE),
-          }, '它正忙（模型在生成 / 工具在执行）时你再发一条指令，就会自动分叉出新会话：'
-            + '新的那条立刻接管，这条留在后台跑完并把结果回注过来。'))
-        }
+        // 空态引导（"它正忙时你再发一条指令，就会自动分叉出…"）**已删**（用户 2026-10：明显是噪声）。
+        // 它既不是模型可见的内容、也不是数据派生的标签（同 0.6.2 那条"卡片正文原则"）——
+        // 这类"解释插件怎么工作"的文案一律不占界面：摘要行那句 `还没有分叉` 已经把状态说完。
       }
 
       return React.createElement('div', {

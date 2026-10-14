@@ -172,12 +172,16 @@ test('页签渲染：旧边（没有 trigger / at）只显示会话坐标，不�
   }
 })
 
-test('页签渲染：只有自己一条会话时给"还没有分叉"的引导，且不画树', async () => {
+test('页签渲染：只有自己一条会话时只报"还没有分叉"，不复述插件怎么工作', async () => {
   const view = await mountView({ current: 'session-root-000001', nodes: [node({})] })
   const text = view.texts.join('\n')
   try {
     assert.match(text, /还没有分叉/, '摘要行要说明还没有分叉')
-    assert.match(text, /就会自动分叉出新会话/, '空态要说明怎么触发分叉')
+    // 空态**只**报状态，不解释"它忙时你再发一条指令会怎样"（用户 2026-10：那是噪声，已删）。
+    // 判据同 0.6.2 的卡片正文原则：界面文字要么是模型可见内容、要么是数据派生的标签。
+    for (const noise of ['它正忙', '自动分叉出新会话', '结果回注']) {
+      assert.ok(!text.includes(noise), `空态不得出现解释性文案「${noise}」：\n` + text)
+    }
     assert.ok(!text.includes('⑂1 <本会话名>'),
       '空态压缩成一句，不再复述命名规则（那里已经有一行示例行）')
     assert.ok(!/undefined|null|NaN/.test(text), '渲染文案里不能漏出 undefined：\n' + text)
