@@ -544,7 +544,6 @@ window.__ModuleLoader__.load({
           ? '分叉于：—'
           : '分叉于：' + (facts.clock === '' ? '' : facts.clock)
             + (facts.rel === '' ? '' : '（' + facts.rel + '）'),
-        facts.isCurrent ? '当前会话' : '点击切过去',
       ].join('\n')
     }
 
@@ -628,8 +627,7 @@ window.__ModuleLoader__.load({
      * （用户 2026-10："hover 出现的信息没有层次，所有信息都堆在了一起"）：
      *
      * ① **标题行**：徽章 + 名字 + 状态胶囊（一眼是"哪条会话、什么状态"）；
-     * ② **键值行**：会话 id / 触发指令（引用块）/ 分叉时刻（绝对 · 相对）/ 位置；标签列定宽对齐；
-     * ③ **页脚**：动作提示（当前卡 / 其它卡各一句）。
+     * ② **键值行**：会话 id / 触发指令（引用块）/ 分叉时刻（绝对 · 相对）/ 位置；标签列定宽对齐。
      * @param {any} props 渲染输入。
      * @returns {any} React 元素。
      */
@@ -711,10 +709,9 @@ window.__ModuleLoader__.load({
             ? detailRow('位置', value(facts.isCurrent ? '你在这里' : '它在回答你'))
             : null,
         ]),
-        React.createElement('div', {
-          key: 'foot',
-          style: { fontSize: '11.5px', color: TOKEN.labelTertiary },
-        }, facts.isCurrent ? '当前会话' : '点击切过去'),
+        // 页脚那行动作提示**已删**（用户 2026-10）：`点击切过去` 是操作提示、不是这一层的详情，
+        // 而当前卡那半句 `当前会话` 又与键值行里的 `位置：你在这里` 重复。可点性由指针形状与
+        // 悬停抬升表达，不需要再用文字说一遍。
       ])
     }
 

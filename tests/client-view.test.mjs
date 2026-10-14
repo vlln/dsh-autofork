@@ -319,9 +319,13 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
 
   const head = cards.find(card => card.props['data-session-id'] === 'session-b')
   assert.match(String(head.props.title), /触发指令：把日志也改成 JSON/, '触发指令给全文（卡上是截断的）')
-  assert.match(String(head.props.title), /当前会话/, '当前卡的动作提示')
-  const root = cards.find(card => card.props['data-session-id'] === 'session-root')
-  assert.match(String(root.props.title), /点击切过去/, '别的卡给"点击切换"提示')
+  // 动作提示那两行**已删**（用户 2026-10："点击切过去"是操作提示、不是这一层的详情；
+  // 当前卡那半句与键值行里的"位置：你在这里"重复）。可点性由指针与悬停抬升表达。
+  for (const card of cards) {
+    const detail = String(card.props.title)
+    assert.ok(!detail.includes('点击切过去'), '详情里不再写动作提示：\n' + detail)
+    assert.ok(!detail.includes('当前会话'), '当前卡也不另写一遍"当前会话"：\n' + detail)
+  }
 
   view.stop()
 })
