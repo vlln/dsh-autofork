@@ -233,6 +233,9 @@ export async function mountBundle(options = {}) {
         ok: true,
         params: {},
         mode: options.mode ?? 'auto',
+        /** 侧栏徽标要的两样：`{会话 id: 序号}` + 字形。 */
+        marks: options.marks ?? {},
+        mark: options.mark ?? '\u2442',
         /** 家族级开关（页签上「自动回注」那个按钮的初值）。 */
         muted: options.muted === true,
         tools: [],
@@ -246,12 +249,27 @@ export async function mountBundle(options = {}) {
   // 4) 假 DOM：只有本插件用到的几样（查询队列行、样式表宿主、DOM 观察者）
   /** 本插件注入的 `<style>` 元素（断言样式与官方 `.action` 一致用）。 */
   const styleElements = []
-  if (options.queueRowNodes !== undefined) {
+  if (options.queueRowNodes !== undefined || options.sessionRowNodes !== undefined) {
     globalThis.document = {
-      querySelectorAll: selector => (selector === '[data-queue-dock] li' ? options.queueRowNodes : []),
+      querySelectorAll: (selector) => {
+        if (selector === '[data-queue-dock] li') return options.queueRowNodes ?? []
+        // 侧栏行的锚（官方源码里的 `data-row-key`）——徽标注入按它找行。
+        if (selector === '[data-row-key]') return options.sessionRowNodes ?? []
+        return []
+      },
       getElementById: () => null,
       createElement: () => {
-        const element = { id: '', textContent: '', parentNode: null }
+        const element = {
+          id: '',
+          textContent: '',
+          parentNode: null,
+          /** 徽标元素：`setAttribute` / `style` / `remove` 要像真 DOM 那样可用。 */
+          attributes: {},
+          style: {},
+          setAttribute(name, value) { this.attributes[name] = String(value) },
+          getAttribute(name) { return this.attributes[name] ?? null },
+          remove() { this.removed = true },
+        }
         styleElements.push(element)
         return element
       },

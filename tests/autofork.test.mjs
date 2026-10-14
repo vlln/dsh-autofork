@@ -1436,8 +1436,11 @@ test('health.nodes：链条按"根 → 最新"排序，且带 depth / current / 
   assert.equal(headBody.nodes[1].ordinal, 1)
   // `label`：去掉 `<标记><序号> ` 前缀的显示名（页签左边那枚徽章就是它，名字里再来一遍
   // 会读成"⑂1 ⑂1 修 GUI 卡顿"）。
-  assert.equal(headBody.nodes[1].title, '⑂1 会话 parent', '命名基名取家族根标题（本用例没有标题服务）')
-  assert.equal(headBody.nodes[1].label, '会话 parent', 'label = title 去掉徽章那截前缀')
+  // 0.11.0 起标题**只放基名**：标记 + 序号改由徽标表达（页签那枚、以及侧栏行那枚）。
+  assert.equal(headBody.nodes[1].title, '会话 parent', '标题就是基名，不再带 `⑂n ` 前缀')
+  assert.equal(headBody.nodes[1].label, '会话 parent', 'label = 去掉旧前缀后的显示名（新标题是空操作）')
+  // 侧栏徽标的数据来源：全局标记表（`{会话 id: 序号}`）。
+  assert.deepEqual(headBody.marks, { [headId]: 1 }, 'health 要下发 marks，侧栏行才画得出徽标')
   assert.equal(headBody.nodes[0].at, null, '家族根是用户自己开的会话，没有分叉时刻')
   assert.equal(headBody.nodes[0].trigger, '')
   assert.equal(headBody.nodes[0].ordinal, 0)
@@ -1471,14 +1474,15 @@ function titledHarness(titles) {
   return harness({ titles })
 }
 
-test('命名：建 head 时把标题钉成 `⑂1 <根标题>`（前缀 + 不累加）', async () => {
+test('命名：标题只放基名，序号进血缘（+ 徽标）—— 不累加', async () => {
   const { ctx, calls, emitInsert } = titledHarness({ 'session-parent': '修 GUI 卡顿' })
   applyChain(ctx, undefined)
   emitInsert(userMessage())
   await flush()
 
   const headId = calls.agentsCreate[0].sessionId
-  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂1 修 GUI 卡顿' }])
+  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '修 GUI 卡顿' }], '标题不带 `⑂n ` 前缀')
+  assert.equal(calls.lineageWrites.at(-1).edge.ordinal, 1, '序号仍在血缘里（徽标读它）')
 })
 
 test('命名：盘上已有 ⑂1 → 新分叉是 ⑂2（按基名接号、不累加）', async () => {
@@ -1494,7 +1498,8 @@ test('命名：盘上已有 ⑂1 → 新分叉是 ⑂2（按基名接号、不�
   emitInsert(userMessage())
   await flush()
   const headId = calls.agentsCreate[0].sessionId
-  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂2 修 GUI 卡顿' }])
+  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '修 GUI 卡顿' }])
+  assert.equal(calls.lineageWrites.at(-1).edge.ordinal, 2, '接着盘上的 ⑂1 编到 2')
 })
 
 test('命名：序号按**家族**计数 —— 另一个家族（哪怕同名）编到几号都不算进来', async () => {
@@ -1509,7 +1514,7 @@ test('命名：序号按**家族**计数 —— 另一个家族（哪怕同名�
   emitInsert(userMessage())
   await flush()
   const headId = calls.agentsCreate[0].sessionId
-  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂1 修 GUI 卡顿' }],
+  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '修 GUI 卡顿' }],
     '同名但不同家族 ⇒ 序号各算各的（按 rootId，不按基名）')
 })
 
@@ -1527,11 +1532,12 @@ test('命名：别的进程刚写的边 —— 分配前强制重读，序号不
   emitInsert(userMessage())
   await flush()
   const headId = calls.agentsCreate[0].sessionId
-  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂4 修 GUI 卡顿' }],
+  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '修 GUI 卡顿' }])
+  assert.equal(calls.lineageWrites.at(-1).edge.ordinal, 4,
     '必须看到别的进程写的 ⑂3，于是本次是 ⑂4（否则会重号）')
 })
 
-test('命名：基名从父标题里剥掉标记 —— 不会累积成 `⑂1 ⑂2 …`', async () => {
+test('命名：旧标题里的标记仍会被剥掉 —— 不会累积成 `⑂1 ⑂2 …`，也不写回前缀', async () => {
   const { ctx, calls, emitInsert } = titledHarness({ 'session-parent': '⑂3 修 GUI 卡顿' })
   applyChain(ctx, undefined)
   emitInsert(userMessage())
@@ -1539,7 +1545,7 @@ test('命名：基名从父标题里剥掉标记 —— 不会累积成 `⑂1 �
   const headId = calls.agentsCreate[0].sessionId
   // 根标题即便自己带着标记（理论上不该发生，但绝不能让它滚雪球），也先剥干净再编号：
   // 基名是 `修 GUI 卡顿`（不是 `⑂3 修 GUI 卡顿`），序号从血缘表/内存里算。
-  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂1 修 GUI 卡顿' }],
+  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '修 GUI 卡顿' }],
     '基名不含标记；序号不含"父标题里那个 3"——那已经不是判据了')
 })
 
@@ -1554,7 +1560,7 @@ test('命名：拿不到任何标题时退回可读兜底名，而不是空标�
   assert.equal(calls.renames.length, 1)
   assert.equal(calls.renames[0].sessionId, headId)
   // 桩里根会话是 `session-parent` ⇒ 短形式 `parent`（`shortSessionId` 取 `session-` 之后的前 8 位）。
-  assert.equal(calls.renames[0].title, '⑂1 会话 parent')
+  assert.equal(calls.renames[0].title, '会话 parent', '兜底名同样不带前缀（标记交给徽标）')
 })
 
 test('命名：`titleMark` 为空串 → 关闭命名（不做任何 rename）', async () => {
@@ -1608,7 +1614,7 @@ test('分叉时把血缘边写进官方存储域（这是重启后关系不丢�
   assert.equal(written.rootId, 'session-parent')
   assert.equal(written.ordinal, 1)
   assert.equal(written.base, '修 GUI 卡顿')
-  assert.equal(written.title, '⑂1 修 GUI 卡顿')
+  assert.equal(written.title, '修 GUI 卡顿', '边里存的也是不带前缀的标题')
   assert.equal(typeof written.createdAt, 'number')
   // 触发指令也要落进去：页签上"这条分叉是为什么来的"全靠它（名字同族是一样的）。
   assert.equal(written.trigger, '改成用 worktree 隔离')
@@ -1708,7 +1714,8 @@ test('序号也来自血缘表：盘上已有 ⑂2 → 新分叉是 ⑂3（不�
   emitInsert(userMessage())
   await flush()
   const headId = calls.agentsCreate[0].sessionId
-  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '⑂3 修 GUI 卡顿' }])
+  assert.deepEqual(calls.renames, [{ sessionId: headId, title: '修 GUI 卡顿' }])
+  assert.equal(calls.lineageWrites.at(-1).edge.ordinal, 3, '盘上已有 ⑂2 ⇒ 本次 ⑂3')
 })
 
 test('血缘域打不开 → 只降级成"内存血缘"，分叉与命名照常', async () => {
@@ -1721,7 +1728,7 @@ test('血缘域打不开 → 只降级成"内存血缘"，分叉与命名照常'
   await flush()
   assert.equal(calls.agentsCreate.length, 1, '域坏掉不能影响分叉')
   assert.deepEqual(calls.lineageWrites, [], '域没打开就不落盘（只在内存里）')
-  assert.deepEqual(calls.renames, [{ sessionId: calls.agentsCreate[0].sessionId, title: '⑂1 修 GUI 卡顿' }])
+  assert.deepEqual(calls.renames, [{ sessionId: calls.agentsCreate[0].sessionId, title: '修 GUI 卡顿' }])
   // 家族至少还有内存那一条（本次运行内的行为不变）。
   const body = await callHealth(calls.routes, 'sessionId=session-parent')
   assert.equal(body.nodes.length, 2)

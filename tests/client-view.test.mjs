@@ -342,6 +342,63 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
   view.stop()
 })
 
+test('侧栏行的「分叉标记」是**徽标**，不是名字字符串的一部分', async () => {
+  // 用户 2026-10："把'⑂n'作为一个标记，不属于 session name 字符串的一部分。"
+  // 官方没有常驻徽标插槽（`sidebar.workspaces.session.row.action` 是**悬停**动作区）⇒ 自造缝：
+  // 按 `[data-row-key="session:<id>"]` 找行，在**标题之前**插一枚 `⑂n`。
+  const MARK = '\u2442'
+  /** 造一行（官方结构：slot / title / time / rowActions）。 */
+  const makeRow = (key, titleText) => {
+    const inserted = []
+    const row = {
+      getAttribute: name => (name === 'data-row-key' ? key : null),
+      children: [{ textContent: '' }, { textContent: titleText }, { textContent: '2d' }, { textContent: '' }],
+      // **像真 DOM 一样真的插进 children**：否则测不出"下一次同步把自己徽标当标题"那个坑。
+      insertBefore(node, before) {
+        const at = before === null || before === undefined ? this.children.length : this.children.indexOf(before)
+        this.children.splice(at < 0 ? this.children.length : at, 0, node)
+        inserted.push(node)
+      },
+      querySelector: selector => (selector === '[data-autofork-mark]'
+        ? inserted.find(node => node.attributes['data-autofork-mark'] !== undefined) ?? null
+        : null),
+      inserted,
+    }
+    return row
+  }
+  const marked = makeRow('session:session-head-1', '修 GUI 卡顿')
+  const legacy = makeRow('session:session-old-2', `${MARK}1 Sleep 1min`)   // 旧标题自带标记
+  const plain = makeRow('session:session-plain-3', '普通会话')
+  const workspace = makeRow('workspace:533e73a4', 'Default workspace')
+
+  const view = await mountView({
+    current: 'session-someone',
+    nodes: [],
+    marks: { 'session-head-1': 3, 'session-old-2': 1 },
+    mark: MARK,
+    sessionRowNodes: [marked, legacy, plain, workspace],
+  })
+
+  assert.equal(marked.inserted.length, 1, '被标记的行要插一枚徽标')
+  assert.equal(marked.inserted[0].textContent, `${MARK}3`, '徽标内容 = 标记 + 序号')
+  assert.equal(legacy.inserted.length, 0, '标题里已经带标记的行**不**再插徽标（否则读成 `⑂1 ⑂1 名字`）')
+  assert.equal(plain.inserted.length, 0, '没被标记的会话不插任何东西')
+  assert.equal(workspace.inserted.length, 0, '工作区行不插（只认 `session:` 前缀）')
+  view.stop()
+
+  // **回归**：徽标插在标题之前 ⇒ 下一次同步时它在 `children[1]`，标题顺延到 `children[2]`。
+  // 不区分这一步就会把**自己的徽标**当标题读（以为"标题已带标记"）⇒ 删掉徽标 ⇒ 插/删来回抖。
+  const again = await mountView({
+    current: 'session-someone',
+    nodes: [],
+    marks: { 'session-head-1': 3, 'session-old-2': 1 },
+    mark: MARK,
+    sessionRowNodes: [marked, legacy, plain, workspace],
+  })
+  assert.equal(marked.inserted.length, 1, '第二次同步不能把徽标删掉（幂等）')
+  again.stop()
+})
+
 test('每张卡自带「自动回注」开关：按会话渲染、点一下按同形契约落盘（且不误触切会话）', async () => {
   // 用户 2026-10："自动回注应该是每个 session 独立开关的功能。" ⇒ 开关挂在**每张卡**上，
   // 语义是"这条会话跑完要不要自动把结果投给它派生出的会话"。

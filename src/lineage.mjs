@@ -201,6 +201,21 @@ export function createLineage(facility, debug) {
     ready,
 
     /**
+     * **所有分叉会话的标记表**（`{会话 id: 序号}`）——给客户端的侧栏徽标用。
+     *
+     * 只收 `ordinal > 0` 的边（没开命名时序号为 0，那种家族不画徽标）。表很小（每条分叉一项），
+     * 随 health 轮询下发；行数上千时才需要考虑分页/裁剪（见 engineering-notes 的取舍）。
+     * @returns {Record<string, number>} 会话 id → 序号。
+     */
+    marks() {
+      const out = {}
+      for (const [headId, edge] of edges) {
+        if (typeof edge?.ordinal === 'number' && edge.ordinal > 0) out[headId] = edge.ordinal
+      }
+      return out
+    },
+
+    /**
      * 一条**会话**的设置（没写过就是默认值：自动回注**开**）。
      * @param {string} sessionId 会话 id。
      * @returns {{muted: boolean}} 设置。

@@ -161,7 +161,7 @@ window.__ModuleLoader__.load({
     /* ------------------------------ 模块级 store ------------------------------ */
 
     /** UI 快照；轮询写入，React 组件订阅。 */
-    var snapshot = { current: undefined, nodes: [], driver: null, mode: 'auto' }
+    var snapshot = { current: undefined, nodes: [], driver: null, mode: 'auto', marks: {}, mark: '' }
 
     /** 订阅者集合（组件用）。 */
     var listeners = new Set()
@@ -2129,6 +2129,107 @@ window.__ModuleLoader__.load({
        *
        * @returns {string|undefined} 当前会话 id。
        */
+      /** 侧栏行元素的锚（官方源码里的 `data-row-key`，值形如 `session:<id>`）。 */
+      var ROW_KEY_ATTR = 'data-row-key'
+
+      /** 我们自己插的徽标（只碰带这个属性的节点，从不改官方 DOM 的其它内容）。 */
+      var MARK_ATTR = 'data-autofork-mark'
+
+      /**
+       * 把「分叉标记」画成侧栏行上的**徽标** —— 用户 2026-10："把'⑂n'作为一个标记，
+       * 不属于 session name 字符串的一部分"。
+       *
+       * 官方**没有**常驻徽标插槽（`sidebar.workspaces.session.row.action` 是悬停才出现的动作区），
+       * 所以走**自造缝**（同队列行上的分叉按钮）：按 `[data-row-key="session:<id>"]` 找行，
+       * 在**标题之前**插一枚 `⑂n`。三条自我约束：
+       *
+       *  ① **失败一律是"不出现"**：没有 document / 找不到行 / 结构变了 ⇒ 什么都不做，
+       *     绝不动官方 DOM 的其它部分（原因只写进诊断通道）；
+       *  ② 只增删**我们自己插的**节点（`data-autofork-mark`），可幂等重复调用；
+       *  ③ 旧会话的标题里**已经带** `⑂n ` ⇒ 那种行不插徽标（否则会读成 `⑂1 ⑂1 名字`）。
+       * @param {Record<string, number>} marks 会话 id → 序号。
+       * @param {string} mark 标记字形（服务端下发；客户端不硬编字形）。
+       */
+      function syncRowMarks(marks, mark) {
+        if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
+        if (mark === '' || mark === undefined || mark === null) return
+        var wanted = marks !== null && marks !== undefined && typeof marks === 'object' ? marks : {}
+        var rows
+        try {
+          rows = document.querySelectorAll('[' + ROW_KEY_ATTR + ']')
+        } catch (error) {
+          postNote('mark.query-failed: ' + String(error))
+          return
+        }
+        for (var index = 0; index < rows.length; index += 1) {
+          try {
+            syncRowMark(rows[index], wanted, mark)
+          } catch (error) {
+            postNote('mark.row-failed: ' + String(error))
+          }
+        }
+      }
+
+      /**
+       * 同步**一行**的徽标（见 {@link syncRowMarks} 的三条约束）。
+       * @param {any} row 行元素。
+       * @param {Record<string, number>} wanted 会话 id → 序号。
+       * @param {string} mark 标记字形。
+       */
+      function syncRowMark(row, wanted, mark) {
+        if (row === null || row === undefined) return
+        var key = typeof row.getAttribute === 'function' ? String(row.getAttribute(ROW_KEY_ATTR) ?? '') : ''
+        if (key.indexOf('session:') !== 0) return
+        var sessionId = key.slice('session:'.length)
+        var ordinal = wanted[sessionId]
+        var existing = typeof row.querySelector === 'function' ? row.querySelector('[' + MARK_ATTR + ']') : null
+        var active = typeof ordinal === 'number' && ordinal > 0
+        // 官方行结构是 `slot / title / time / rowActions` ⇒ 无徽标时标题 = `children[1]`。
+        //
+        // ⚠️ 有徽标时它**就在 index 1**（我们总插在标题前面）⇒ 标题顺延到 `children[2]`。
+        // 踩过的坑：不区分这一步，下一次同步会把**自己的徽标**当成标题读（于是以为"标题已带标记"
+        // ⇒ 删掉徽标 ⇒ 插/删来回抖动）。
+        var kids = row.children !== undefined && row.children !== null ? row.children : undefined
+        var title = kids !== undefined ? kids[1] : undefined
+        if (existing !== null && existing !== undefined && title === existing) title = kids[2]
+        var titleText = title !== undefined && title !== null ? String(title.textContent ?? '') : ''
+        if (active && titleText.indexOf(mark + String(ordinal)) === 0) {
+          // 旧会话的标题自带标记 ⇒ 不插徽标（否则重复）。
+          if (existing !== null && existing !== undefined) existing.remove()
+          return
+        }
+        if (!active) {
+          if (existing !== null && existing !== undefined) existing.remove()
+          return
+        }
+        var text = mark + String(ordinal)
+        if (existing !== null && existing !== undefined) {
+          if (existing.textContent !== text) existing.textContent = text
+          return
+        }
+        if (typeof document.createElement !== 'function') return
+        var badge = document.createElement('span')
+        badge.setAttribute(MARK_ATTR, sessionId)
+        badge.setAttribute('aria-hidden', 'true')
+        badge.textContent = text
+        if (badge.style !== undefined && badge.style !== null) {
+          Object.assign(badge.style, {
+            flex: 'none',
+            marginRight: '6px',
+            padding: '0 5px',
+            height: '18px',
+            lineHeight: '18px',
+            borderRadius: '5px',
+            fontSize: '11.5px',
+            fontWeight: '600',
+            background: 'rgba(11, 107, 203, 0.12)',
+            color: TOKEN.accent,
+            userSelect: 'none',
+          })
+        }
+        if (typeof row.insertBefore === 'function') row.insertBefore(badge, title ?? null)
+      }
+
       function currentSessionId() {
         // 唯一的**可达**来源：`sessions.list` 的 `retainedBy.mainView`。
         //
@@ -2312,6 +2413,9 @@ window.__ModuleLoader__.load({
           .then(function (response) { return response.ok ? response.json() : undefined })
           .then(function (body) {
             if (stopped || body === undefined || body.ok !== true) return
+            syncRowMarks(body.marks, body.mark)
+            // 每次轮询顺带同步一次侧栏徽标：publish 只在**数据变化**时通知，
+            // 而"新滚出来的行"没有任何事件 ⇒ 必须按 tick 兜一次（一次 querySelectorAll，很轻）。
             publish({
               current: sessionId,
               // 服务端算好的家族**链条**（根 → 最新，含本会话自己）：`title` / `state` /
@@ -2323,6 +2427,12 @@ window.__ModuleLoader__.load({
               // 服务端**此刻生效**的分叉方式：手动模式下队列行才有「分叉」按钮。
               // 以服务端为准（而不是读设置文档），所以按钮不会出现在宿主不照它行事的时候。
               mode: body.mode === 'manual' ? 'manual' : 'auto',
+              /**
+               * **分叉标记表**（`{会话 id: 序号}`）与字形：用来把标记画成侧栏行上的**徽标**，
+               * 而不是塞进 session name 字符串（用户 2026-10）。
+               */
+              marks: body.marks !== null && typeof body.marks === 'object' ? body.marks : {},
+              mark: typeof body.mark === 'string' ? body.mark : '',
             })
             var handoff = body.handoff
             // 字段名必须与服务端一致：链式模型重写时服务端改成了 `sessionId`

@@ -618,7 +618,10 @@ export function apply(ctx, config) {
     // （用户实测：盘上已有 ⑂9，而本进程快照最大只到 ⑂8 ⇒ 下一次分叉又叫 ⑂9）。
     await refreshLineage(true)
     const ordinal = nextBranchOrdinal(rootId, base)
-    const title = `${mark}${ordinal} ${base}`
+    // **标题只放基名**（用户 2026-10："把 ⑂n 作为一个标记，不属于 session name 字符串的一部分"）。
+    // 标记 + 序号由「分叉」页签的徽标与**侧栏行的徽标**（`marks` 下发 + 客户端注入）表达；
+    // 好处之一：用户改名不会再毁掉标记（旧数据里 `⑂1 Sleep for one minute～` 就是这么来的）。
+    const title = base
     try {
       sessionTitleApi.rename(headSession, title)
       debug('title.assigned', {
@@ -728,7 +731,8 @@ export function apply(ctx, config) {
       const full = titleOf(item.id)
       // `label`：把**已经由徽章表达**的 `<标记><序号> ` 前缀去掉之后的显示名。
       // 页签左边就有一枚 `⑂1` 徽章，名字里再带一遍会读成"⑂1 ⑂1 修 GUI 卡顿"（实测在预览里
-      // 一眼看到）。前缀用 `params.titleMark` + 序号精确匹配，不是正则猜——标记是可配的。
+      // 一眼看到）。旧数据里标记写在标题字符串里（`⑂3 名字`），所以这里仍然**剥掉它**——
+      // 精确匹配 `params.titleMark` + 序号，不是正则猜。0.11.0 起新标题不再带前缀。
       const prefix = ordinal > 0 && params.titleMark !== '' ? `${params.titleMark}${ordinal} ` : ''
       const label = prefix !== '' && typeof full === 'string' && full.startsWith(prefix)
         ? full.slice(prefix.length)
@@ -2326,6 +2330,14 @@ export function apply(ctx, config) {
            * ——以服务端为准（不是读设置文档），所以按钮只会出现在宿主真的会按它行事时。
            */
           mode: forkMode(),
+          /**
+           * **全局的「分叉标记」表**：`{会话 id: 序号}` —— 侧栏每一行都能查到自己的序号，
+           * 于是标记可以做成**徽标**而不是名字的一部分（见标题不再带前缀的那处注释）。
+           * 只有分叉出来的会话在表里；其它行不注入任何东西。
+           */
+          marks: lineage?.marks?.() ?? {},
+          /** 标记字形（`params.titleMark`）。客户端画徽标用它，不自己硬编字形。 */
+          mark: branchMark(),
           tools: exposedToolNames,
           /**
            * 家族链条（根 → 最新，含本会话自己）：客户端「分叉」页签的数据源。
