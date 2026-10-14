@@ -339,40 +339,54 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
   view.stop()
 })
 
-test('页签的「自动回注」开关：按家族渲染状态，点一下按同形契约落盘', async () => {
-  // 用户 2026-10：开关放在「分叉」页签里；它改的是**自动回注**（不是关系、不是会话）。
-  /** 在渲染树里按 props 键找元素。 */
-  const findBy = (tree, key) => {
-    let found
+test('每张卡自带「自动回注」开关：按会话渲染、点一下按同形契约落盘（且不误触切会话）', async () => {
+  // 用户 2026-10："自动回注应该是每个 session 独立开关的功能。" ⇒ 开关挂在**每张卡**上，
+  // 语义是"这条会话跑完要不要自动把结果投给它派生出的会话"。
+  /** 收集所有带某属性的元素。 */
+  const findAll = (tree, key, out = []) => {
     const walk = (node) => {
-      if (found !== undefined || node === null || typeof node === 'string') return
+      if (node === null || typeof node === 'string') return
       if (Array.isArray(node)) { node.forEach(walk); return }
-      if (node.props?.[key] !== undefined) { found = node; return }
+      if (node.props?.[key] !== undefined) out.push(node)
       walk(node.children)
     }
     walk(tree)
-    return found
+    return out
   }
 
-  const on = await mountView({ current: 'session-root-000001', nodes: [node({})], muted: false })
-  const button = findBy(on.tree, 'data-mute-toggle')
-  assert.ok(button !== undefined, '页签头部必须有自动回注开关')
-  assert.equal(button.props['data-mute-toggle'], 'on', '默认是开')
-  assert.equal(button.props['aria-pressed'], false)
-  assert.match(on.texts.join('\n'), /自动回注 开/)
-  assert.match(String(button.props.title), /关掉后：会话照常运行、这棵树照常显示/, 'tooltip 要讲清关掉的含义')
+  const view = await mountView({
+    current: 'session-root-000001',
+    nodes: [
+      node({ sessionId: 'session-root-000001', muted: false }),
+      node({ sessionId: 'session-root-000002', title: '⑂1 修 GUI 卡顿', label: '修 GUI 卡顿', ordinal: 1, muted: true, depth: 1, parentId: 'session-root-000001' }),
+    ],
+  })
 
-  button.props.onClick()
-  const post = on.fetchCalls.find(call => String(call.url).includes('/api/dsh-autofork/mute'))
+  const switches = findAll(view.tree, 'data-mute-toggle')
+  assert.equal(switches.length, 2, '每张卡各一个开关')
+  const onSwitch = switches.find(item => item.props['data-mute-toggle'] === 'session-root-000001')
+  const offSwitch = switches.find(item => item.props['data-mute-toggle'] === 'session-root-000002')
+  assert.equal(onSwitch.props['aria-checked'], 'false', '开着的会话 aria-checked=false（未静音）')
+  assert.equal(offSwitch.props['aria-checked'], 'true', '关掉的会话 aria-checked=true')
+  assert.equal(view.texts.includes('回注开'), true)
+  assert.equal(view.texts.includes('回注关'), true)
+  // 整卡只有一个 tooltip 是既有契约 ⇒ 开关**不带**自己的 title，含义写在卡根那句里
+  assert.equal(onSwitch.props.title, undefined, '开关不得自带 title')
+  const cards = findAll(view.tree, 'data-session-id')
+  const rootCard = cards.find(card => card.props['data-session-id'] === 'session-root-000001')
+  assert.match(String(rootCard.props.title), /自动回注：开/, '卡根 tooltip 要写清这个开关的含义')
+
+  // 点开关：必须 stopPropagation（否则会顺带触发卡片的"切会话"）
+  let stopped = false
+  let navigated = null
+  view.bundle?.opened
+  onSwitch.props.onClick({ stopPropagation: () => { stopped = true } })
+  assert.equal(stopped, true, '点开关要阻止冒泡')
+  const post = view.fetchCalls.find(call => String(call.url).includes('/api/dsh-autofork/mute'))
   assert.ok(post !== undefined, '点击要打 mute 路由')
   assert.equal(post.init.method, 'POST')
   assert.equal(post.init.headers['x-dsh-autofork'], '1', '与分叉路由同一道安全边界')
-  assert.deepEqual(JSON.parse(post.init.body), { sessionId: 'session-root-000001', muted: true })
-
-  const off = await mountView({ current: 'session-root-000001', nodes: [node({})], muted: true })
-  const offButton = findBy(off.tree, 'data-mute-toggle')
-  assert.equal(offButton.props['data-mute-toggle'], 'off')
-  assert.match(off.texts.join('\n'), /自动回注 关/)
-  off.stop()
-  on.stop()
+  assert.deepEqual(JSON.parse(post.init.body), { sessionId: 'session-root-000001', muted: true },
+    '改的是**这张卡**那条会话，不是当前会话/家族')
+  view.stop()
 })

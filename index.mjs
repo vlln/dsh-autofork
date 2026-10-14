@@ -753,6 +753,11 @@ export function apply(ctx, config) {
         trigger: edge?.trigger ?? recordByHead.get(item.id)?.trigger ?? '',
         /** 命名序号（`<标记><ordinal>`）；没开命名或家族根时为 0。 */
         ordinal,
+        /**
+         * **这条会话自己**的"自动回注"开关（卡片上那个小开关的初值）。语义：它跑完要不要
+         * 自动把最后一条结果投给它派生出的会话——关掉一条，安静的是**它自己**的播报。
+         */
+        muted: sessionMuted(item.id),
       }
     })
   }
@@ -1993,9 +1998,16 @@ export function apply(ctx, config) {
     return false
   }
 
-  /** 这个家族是否被关掉了自动回注（默认开；读不到血缘时按"开"处理）。 */
-  function familyMuted(rootId) {
-    return lineage?.familyOf?.(rootId)?.muted === true
+  /**
+   * **这条会话**是否关掉了自动回注（默认开；读不到血缘时按"开"处理）。
+   *
+   * 判据是**会话自己**的设置，不是家族：回注是"这条会话跑完 → 投给它派生出的会话"这个行为，
+   * 所以开关属于**发送方**（用户 2026-10：每个 session 独立）。
+   * @param {string} sessionId 会话 id。
+   * @returns {boolean} 是否已关掉。
+   */
+  function sessionMuted(sessionId) {
+    return lineage?.settingsOf?.(sessionId)?.muted === true
   }
 
   async function reportWorkerReply(worker, record) {
@@ -2006,8 +2018,8 @@ export function apply(ctx, config) {
     // **自动回注的闸门**（家族级）：关掉之后旧会话跑完不再自动投给新会话——但会话照常跑、
     // 树照常显示、工具（`fork_send` / `fork_list`）照常用。用户 2026-10 定的语义：
     // 这不是"忘掉/删除"，只是不再自动触发后台通知。
-    if (familyMuted(record.rootId)) {
-      debug('report.muted', { worker: worker.id, root: record.rootId })
+    if (sessionMuted(worker.id)) {
+      debug('report.muted', { worker: worker.id })
       return
     }
     const { reply, stepCount } = lastTurnReply(worker)
@@ -2268,11 +2280,6 @@ export function apply(ctx, config) {
            * ——以服务端为准（不是读设置文档），所以按钮只会出现在宿主真的会按它行事时。
            */
           mode: forkMode(),
-          /**
-           * 当前会话所在家族的**自动回注**开关（页签上那个开关的初值）。家族级而不是会话级：
-           * 回注是"旧会话 → 新会话"这条链上的行为。
-           */
-          muted: sessionId === null ? false : familyMuted(familyRootOf(sessionId)),
           tools: exposedToolNames,
           /**
            * 家族链条（根 → 最新，含本会话自己）：客户端「分叉」页签的数据源。
@@ -2381,14 +2388,11 @@ export function apply(ctx, config) {
           json(400, { ok: false, error: 'sessionId-and-muted-required' })
           return
         }
-        // 家族根这时刻**现取**（别的进程可能刚分叉过；同一份事实一个来源）。
+        // 设置**这条会话自己**的开关（键就是它）。先节流重读一次：别的进程可能刚改过它。
         await refreshLineage()
-        const rootId = familyRootOf(sessionId)
-        const persisted = await lineage?.setFamilySetting?.(rootId, { muted: payload.muted })
-        debug('mute.request', {
-          sessionId, root: rootId, muted: payload.muted, persisted: persisted === true,
-        })
-        json(200, { ok: true, rootId, muted: payload.muted })
+        const persisted = await lineage?.setSessionSetting?.(sessionId, { muted: payload.muted })
+        debug('mute.request', { sessionId, muted: payload.muted, persisted: persisted === true })
+        json(200, { ok: true, sessionId, muted: payload.muted })
       },
     })
     if (muteRoute !== undefined) {

@@ -161,7 +161,7 @@ window.__ModuleLoader__.load({
     /* ------------------------------ 模块级 store ------------------------------ */
 
     /** UI 快照；轮询写入，React 组件订阅。 */
-    var snapshot = { current: undefined, nodes: [], driver: null, mode: 'auto', muted: false }
+    var snapshot = { current: undefined, nodes: [], driver: null, mode: 'auto' }
 
     /** 订阅者集合（组件用）。 */
     var listeners = new Set()
@@ -519,6 +519,8 @@ window.__ModuleLoader__.load({
         badge: isRoot ? '根' : '⑂' + String(ordinal),
         ordinal: ordinal,
         trigger: typeof node.trigger === 'string' ? node.trigger : '',
+        /** **这条会话自己**的自动回注开关（宿主按会话下发；见 `sessionMuted`）。 */
+        muted: node.muted === true,
         rel: relTime(node.at, now),
         clock: clockOf(node.at),
       }
@@ -546,6 +548,8 @@ window.__ModuleLoader__.load({
         '会话：' + node.sessionId,
         '状态：' + stateLine(facts),
         facts.trigger === '' ? '触发指令：—（家族根）' : '触发指令：' + facts.trigger,
+        '自动回注：' + (facts.muted ? '关（它跑完不再自动把结果投给它派生出的会话）'
+          : '开（它跑完会把最后一条结果自动投给它派生出的会话）'),
         node.at === null || node.at === undefined
           ? '分叉于：—'
           : '分叉于：' + (facts.clock === '' ? '' : facts.clock)
@@ -756,6 +760,9 @@ window.__ModuleLoader__.load({
       var driver = props.driver
       var now = props.now
       var facts = cardFacts(node, driver, now)
+      var toggle = function (value) {
+        if (typeof props.onToggleMute === 'function') props.onToggleMute(node.sessionId, value)
+      }
       var isCurrent = facts.isCurrent
       var isDriver = facts.isDriver
       var isRoot = facts.isRoot
@@ -891,6 +898,46 @@ window.__ModuleLoader__.load({
         }, [
           showState ? chip('state', meta.text, meta.color, meta.tint) : null,
           isCurrent ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+          // **这条会话自己的「自动回注」开关**（0.9.0：按会话独立，不再是家族级）。
+          // 语义：它跑完要不要自动把最后一条结果投给它派生出的会话 ⇒ 关掉一条，安静的是它自己。
+          //
+          // ⚠️ 卡根已经是 `role="button"`，所以这里用 `role="switch"` + `stopPropagation`：
+          // 点开关不能顺带把卡片也点了（那是"切会话"）。**不带自己的 title** ——
+          // 整卡只有一个 tooltip 是既有契约，含义写在卡根那句里（见 `detailText`）。
+          React.createElement('span', {
+            key: 'mute',
+            role: 'switch',
+            tabIndex: 0,
+            'data-mute-toggle': node.sessionId,
+            'aria-checked': facts.muted ? 'true' : 'false',
+            'aria-label': '自动回注',
+            onClick: function (event) {
+              if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
+              toggle(!facts.muted)
+            },
+            onKeyDown: function (event) {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              if (typeof event.stopPropagation === 'function') event.stopPropagation()
+              toggle(!facts.muted)
+            },
+            style: {
+              flex: 'none',
+              padding: '0 6px',
+              height: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              borderRadius: '999px',
+              cursor: 'pointer',
+              fontSize: '11px',
+              border: '1px solid ' + (facts.muted
+                ? 'var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.45))'
+                : TOKEN.accent),
+              background: facts.muted ? 'transparent' : 'rgba(11, 107, 203, 0.12)',
+              color: facts.muted ? TOKEN.labelSecondary : TOKEN.accent,
+            },
+          }, facts.muted ? '回注关' : '回注开'),
+
           // 卡只有 176px 宽，所以这里用紧凑写法；完整含义留在 tooltip 上。
           (isDriver && !isCurrent)
             ? React.createElement('span', {
@@ -1816,12 +1863,44 @@ window.__ModuleLoader__.load({
       var hover = hoverPair[0]
       var setHover = hoverPair[1]
 
-      // 页签级状态取自 store（`useState(getSnapshot())` + 订阅）：当前会话与家族的自动回注开关。
+      // 页签级状态取自 store（`useState(getSnapshot())` + 订阅）。
       var current = (pair[0] === undefined || pair[0] === null ? {} : pair[0]).current
-      var muted = (pair[0] === undefined || pair[0] === null ? {} : pair[0]).muted === true
-      /** 乐观更新：真正的权威仍是宿主，下一次轮询会带回真实值。 */
-      var setMuted = function (value) {
-        setLocal(Object.assign({}, getSnapshot(), { muted: value === true }))
+
+      /**
+       * 切换**某一条会话**的自动回注（0.9.0 起按会话独立，不再是家族级）。
+       *
+       * 乐观更新（点一下立刻反映），失败则回滚并写诊断通道——设置类动作不该让用户盯着
+       * "点了没反应"。权威仍是宿主：下一次轮询会带回真实值。
+       * @param {string} sessionId 目标会话。
+       * @param {boolean} value 目标值。
+       */
+      var setMuted = function (sessionId, value) {
+        var snap = getSnapshot()
+        setLocal(Object.assign({}, snap, {
+          nodes: (snap.nodes ?? []).map(function (node) {
+            return node.sessionId === sessionId ? Object.assign({}, node, { muted: value }) : node
+          }),
+        }))
+      }
+      var toggleMute = function (sessionId) {
+        var before = (getSnapshot().nodes ?? []).find(function (node) {
+          return node.sessionId === sessionId
+        })
+        var next = !(before !== undefined && before.muted === true)
+        setMuted(sessionId, next)
+        Promise.resolve(fetch(MUTE_PATH, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', [FORK_HEADER]: '1' },
+          body: JSON.stringify({ sessionId: sessionId, muted: next }),
+        })).then(function (response) {
+          if (response === undefined || response.ok !== true) {
+            throw new Error('mute-http-' + String(response?.status))
+          }
+          postNote('mute.set: ' + sessionId + '=' + String(next))
+        }).catch(function (error) {
+          setMuted(sessionId, !next)
+          postNote('mute.failed: ' + String(error))
+        })
       }
       /**
        * 卡片上报 hover/focus：连**视口矩形**一起收下——面板是 `position: fixed` 的浮层，
@@ -1829,29 +1908,6 @@ window.__ModuleLoader__.load({
        * @param {string|null} id 会话 id；null = 离开。
        * @param {any} element 触发事件的卡片元素。
        */
-      /**
-       * 切换当前家族的**自动回注**开关。
-       *
-       * 乐观更新（点一下立刻反映），失败则回滚并把原因写进诊断通道——设置类动作不该让用户
-       * 盯着"点了没反应"。真正的权威仍是宿主（下一次轮询会带回真实值）。
-       */
-      var toggleMute = function () {
-        if (current === undefined) return
-        var next = muted !== true
-        setMuted(next)
-        Promise.resolve(fetch(MUTE_PATH, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', [FORK_HEADER]: '1' },
-          body: JSON.stringify({ sessionId: current, muted: next }),
-        })).then(function (response) {
-          if (response === undefined || response.ok !== true) throw new Error('mute-http-' + String(response?.status))
-          postNote('mute.set: ' + String(next))
-        }).catch(function (error) {
-          setMuted(!next)
-          postNote('mute.failed: ' + String(error))
-        })
-      }
-
       var onHoverCard = function (id, element) {
         if (id === null || element === null || element === undefined
           || typeof element.getBoundingClientRect !== 'function') {
@@ -1898,36 +1954,6 @@ window.__ModuleLoader__.load({
             key: 'b',
             style: { color: TOKEN.labelTertiary, fontSize: '12px' },
           }, summary.join(' · ')),
-          React.createElement('div', { key: 'spacer', style: { flex: '1 1 auto' } }),
-          // **自动回注开关**（家族级）：关掉后会话照常跑、这棵树照常显示，
-          // 只是旧会话跑完不再自动把结果投给新会话（用户 2026-10 定的语义：
-          // 不是"忘掉/删除"）。落盘在宿主 half 的 `families` 表里。
-          React.createElement('button', {
-            key: 'mute',
-            type: 'button',
-            'data-mute-toggle': muted === true ? 'off' : 'on',
-            'aria-pressed': muted === true,
-            disabled: current === undefined,
-            onClick: function () { toggleMute() },
-            title: [
-              muted === true ? '自动回注：关' : '自动回注：开',
-              '旧会话跑完时，把它的最后一条回复自动投给新会话（并唤醒它）。',
-              '关掉后：会话照常运行、这棵树照常显示、工具照常可用，只是不再自动投递。',
-              '点一下切换。',
-            ].join('\n'),
-            style: {
-              flex: 'none',
-              padding: '2px 8px',
-              borderRadius: '999px',
-              border: '1px solid ' + (muted === true
-                ? 'var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.45))'
-                : TOKEN.accent),
-              background: muted === true ? 'transparent' : 'rgba(11, 107, 203, 0.12)',
-              color: muted === true ? TOKEN.labelSecondary : TOKEN.accent,
-              fontSize: '11.5px',
-              cursor: 'pointer',
-            },
-          }, muted === true ? '自动回注 关' : '自动回注 开'),
         ]))
         // 树状图：**连线层（SVG）+ 卡片层（绝对定位）**，与 dsh-context 的 subagent 树同一套语法。
         // 连线的端点落在卡片的边中点上，所以布局与卡片必须共用 `TREE` 的度量（改一处就得改另一处）。
@@ -1943,6 +1969,7 @@ window.__ModuleLoader__.load({
             now: now,
             hovered: hoverId === point.node.sessionId,
             dimmed: lit !== null && !lit.has(point.node.sessionId),
+            onToggleMute: toggleMute,
             onHover: onHoverCard,
           })
         })
@@ -2276,8 +2303,6 @@ window.__ModuleLoader__.load({
               // 服务端**此刻生效**的分叉方式：手动模式下队列行才有「分叉」按钮。
               // 以服务端为准（而不是读设置文档），所以按钮不会出现在宿主不照它行事的时候。
               mode: body.mode === 'manual' ? 'manual' : 'auto',
-              // 当前家族的**自动回注**开关（家族级；见宿主 half 的 `families` 表）。
-              muted: body.muted === true,
             })
             var handoff = body.handoff
             // 字段名必须与服务端一致：链式模型重写时服务端改成了 `sessionId`

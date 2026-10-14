@@ -129,7 +129,7 @@ function harness(options = {}) {
     renames: [],
     /** 血缘域的写入记录：`[{ headId, edge }]`。 */
     lineageWrites: [],
-    lineageFamilyWrites: [],
+    lineageSettingWrites: [],
     /** 血缘域被打开过几次（每次 apply 一次）。 */
     lineageOpens: [],
   }
@@ -318,16 +318,16 @@ function harness(options = {}) {
         calls.lineageOpens.push(spec?.name)
         if (options.lineageBroken === true) throw new Error('backend-not-found: nope')
         const rows = new Map(Object.entries(options.lineageEdges ?? {}))
-        // 第二张表：家族级设置（`families`，键 = 家族根）。桩要按**表名**分派——
-        // 两张表混在一起会让 `familyOf()` 读到一条"边"（形状不对但静默通过）。
-        const familyRows = new Map(Object.entries(options.lineageFamilies ?? {}))
+        // 第二张表：**会话级**设置（`session_settings`，键 = 会话 id）。桩要按**表名**分派——
+        // 两张表混在一起会让 `settingsOf()` 读到一条"边"（形状不对但静默通过）。
+        const settingRows = new Map(Object.entries(options.lineageSettings ?? {}))
         return {
-          table: (table) => (table === 'families'
+          table: (table) => (table === 'session_settings'
             ? {
-              entries: () => [...familyRows.entries()][Symbol.iterator](),
+              entries: () => [...settingRows.entries()][Symbol.iterator](),
               put: async (key, value) => {
-                calls.lineageFamilyWrites.push({ rootId: key, setting: value })
-                familyRows.set(key, value)
+                calls.lineageSettingWrites.push({ sessionId: key, setting: value })
+                settingRows.set(key, value)
               },
             }
             : {
@@ -2481,28 +2481,25 @@ test('fork_send 默认不阻塞：立刻返回，并明说"它不会自动回复
   assert.equal(calls.steers[0].source.awaitReply, undefined, '非 block 不带 awaitReply 标记')
 })
 
-test('自动回注开关：关掉的家族不再自动回注，但分叉与显式通道都不受影响', async () => {
-  // 用户 2026-10 定的语义："即使忘掉它，整个树也存在，只是不再自动触发后台通知"
-  // ⇒ 关的是**自动回注**（旧会话跑完 → 自动投给新会话），不是关系、也不是会话。
-  /** @param {boolean} muted 是否关掉自动回注。 */
-  async function familyRun(muted) {
+test('自动回注开关：**按会话**独立 —— 关掉这条不影响别的会话，也不影响分叉与显式通道', async () => {
+  // 用户 2026-10："自动回注应该是每个 session 独立开关的功能。"
+  // 语义：开关属于**发送方**（这条会话跑完要不要自动把结果投给它派生出的会话）。
+  /** 造一个"worker 已完成一轮"的现场，返回 idle 之后的**投递增量**（分叉自己那次 followup 不算）。 */
+  async function report(settings) {
     const stub = harness({
       titles: { 'session-parent': '修 GUI 卡顿' },
       lineageEdges: { 'session-old-head': edge('session-parent', 'session-parent', 1, 1000) },
-      ...(muted ? { lineageFamilies: { 'session-parent': { muted: true, updatedAt: 1 } } } : {}),
+      ...(settings === undefined ? {} : { lineageSettings: settings }),
     })
     const { ctx, calls, listeners, emitInsert, parent } = stub
     applyChain(ctx, undefined)
     emitInsert(userMessage())
     await flush()
-    // worker 已经跑完一轮 ⇒ 回注的触发条件齐了
     parent.session.snapshotEvents = () => [
       { seq: 0, type: 'turn/start', data: { turn: 1 }, time: NOW },
       { seq: 1, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '结论：改了两个文件' }] } }, time: NOW },
       { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, time: NOW },
     ]
-    // ⚠️ 只看**增量**：分叉本身也会用一次 `followup`（把用户那条指令交付给新 head），
-    // 那不属于"自动回注"。回注的判据是"idle 之后有没有新投递"。
     const before = { steers: calls.steers.length, followups: calls.followups.length }
     listeners.get('agent/status')[0]({ agent: parent, status: 'idle' })
     await flush()
@@ -2513,17 +2510,21 @@ test('自动回注开关：关掉的家族不再自动回注，但分叉与显�
     }
   }
 
-  const off = await familyRun(true)
-  assert.deepEqual(off.steers, [], '关掉之后不得再投递回注消息')
-  assert.deepEqual(off.followups, [], '也不得唤醒（回注那一次请求就不该发）——注意这里只看 idle 之后的增量')
-  assert.equal(off.renames.length, 1, '关掉回注不影响**分叉本身**（该建的 head 照建）')
+  const on = await report()                       // 默认：开
+  assert.ok(on.steers.length + on.followups.length > 0, '对照组：默认要回注')
 
-  const on = await familyRun(false)
-  assert.ok(on.steers.length + on.followups.length > 0,
-    '对照组：开着的时候必须回注（否则上面可能只是"没触发"）')
+  const off = await report({ 'session-parent': { muted: true, updatedAt: 1 } })
+  assert.deepEqual(off.steers, [], '关掉的**这条**会话不再投递回注')
+  assert.deepEqual(off.followups, [], '也不唤醒')
+  assert.equal(off.renames.length, 1, '不影响**分叉本身**')
+
+  // 关键判据：关掉**别的**会话，本条照旧回注（"每个 session 独立"）
+  const other = await report({ 'session-someone-else': { muted: true, updatedAt: 1 } })
+  assert.ok(other.steers.length + other.followups.length > 0,
+    '关掉别的会话不该让这条安静下来')
 })
 
-test('自动回注开关的路由：自定义头 / POST / 形状 / 落盘', async () => {
+test('自动回注开关的路由：自定义头 / POST / 形状 / **按会话**落盘', async () => {
   const { ctx, calls } = harness({ titles: { 'session-parent': '修 GUI 卡顿' } })
   applyChain(ctx, undefined)
   const route = calls.routes.find(candidate => candidate?.path === '/api/dsh-autofork/mute')
@@ -2546,16 +2547,15 @@ test('自动回注开关的路由：自定义头 / POST / 形状 / 落盘', asyn
 
   assert.equal((await call({}, 'POST', '{}')).status, 403, '缺自定义头 ⇒ 403（与分叉路由同一道边界）')
   assert.equal((await call({ 'x-dsh-autofork': '1' }, 'GET')).status, 405, '只收 POST')
-  const missingMuted = await call({ 'x-dsh-autofork': '1' }, 'POST',
-    JSON.stringify({ sessionId: 'session-parent' }))
-  assert.equal(missingMuted.status, 400, '缺 muted ⇒ 400')
+  const missing = await call({ 'x-dsh-autofork': '1' }, 'POST', JSON.stringify({ sessionId: 'session-parent' }))
+  assert.equal(missing.status, 400, '缺 muted ⇒ 400')
 
   const ok = await call({ 'x-dsh-autofork': '1' }, 'POST',
     JSON.stringify({ sessionId: 'session-parent', muted: true }))
   assert.equal(ok.status, 200)
   assert.equal(ok.body.muted, true)
-  const write = calls.lineageFamilyWrites.at(-1)
-  assert.equal(write.rootId, 'session-parent', '键 = 家族根')
-  assert.equal(write.setting.muted, true, '开关落进 families 表')
+  const write = calls.lineageSettingWrites.at(-1)
+  assert.equal(write.sessionId, 'session-parent', '键 = **会话 id**（不是家族根）')
+  assert.equal(write.setting.muted, true, '开关落进 session_settings 表')
   assert.equal(typeof write.setting.updatedAt, 'number')
 })
