@@ -319,6 +319,11 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
 
   const head = cards.find(card => card.props['data-session-id'] === 'session-b')
   assert.match(String(head.props.title), /触发指令：把日志也改成 JSON/, '触发指令给全文（卡上是截断的）')
+  // 状态里的"你在这里 / 现在回答你的是它"**保留在 aria-label**（屏幕阅读器只念它、不念卡内芯片），
+  // 但**不另起一行"位置"**——卡上那两枚胶囊已经写了（用户 2026-10 判定的重复）。
+  assert.match(String(head.props.title), /状态：空闲（你在这里）/, '无障碍详情要带"你在这里"')
+  const plain = cards.find(card => card.props['data-session-id'] === 'session-root')
+  assert.ok(!String(plain.props.title).includes('你在这里'), '不是当前会话就别写它：\n' + String(plain.props.title))
   // 动作提示那两行**已删**（用户 2026-10："点击切过去"是操作提示、不是这一层的详情；
   // 当前卡那半句与键值行里的"位置：你在这里"重复）。可点性由指针与悬停抬升表达。
   for (const card of cards) {
