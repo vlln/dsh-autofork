@@ -15,12 +15,12 @@
  *
  * 于是工具语义是：
  *  - `fork_list`  → 列出**我家族里的会话**（承接来的 upstream + 接管了我的 downstream）
- *  - `fork_steer` → 给家族里某条会话发一条消息（`block:true` 时等它那一轮跑完并拿到它的回复）
+ *  - `fork_send` → 给家族里某条会话发一条消息（`block:true` 时等它那一轮跑完并拿到它的回复）
  *  - `fork_cancel`→ 中止家族里某条会话
  *
  * ## 通信方向（2026-10 用户实测补的护栏）
  *
- * 家族里**只有 `fork_steer` 是显式通道**：一个会话在自己的转写里写普通回复，对方**看不到**。
+ * 家族里**只有 `fork_send` 是显式通道**：一个会话在自己的转写里写普通回复，对方**看不到**。
  * 另有一条自动通道但**单向**：后台会话（origin）那一轮跑完，会把最后一条回复自动投给接手
  * 它的会话；反向没有。这三句话必须留在工具描述里——真实误判正是"head 以为自己的普通回复
  * 已经回给了 origin"（详见 `renderForkNotice` / `renderBranchHint` 的同款说明）。
@@ -156,7 +156,7 @@ export function createBranchTools({ defineTool, related, steer, cancel, steerCei
         + '分叉发生时会形成一条这样的链，最新的那条是 head —— 也就是你。'
         + '这些会话与你在同一工作目录上并行工作（文件系统没有隔离），'
         + '在你需要判断"某件事是不是已经有人在做"、或需要给它们下指令时用它。'
-        + '它也是"对方现在到哪一步了"的查看入口 —— 你发出去的中途指令（`fork_steer`）'
+        + '它也是"对方现在到哪一步了"的查看入口 —— 你发出去的中途指令（`fork_send`）'
         + '没有回执，要确认进展只能看这里或让对方显式回你。',
       parameters: {},
       output: {
@@ -178,7 +178,7 @@ export function createBranchTools({ defineTool, related, steer, cancel, steerCei
     }),
 
     defineTool({
-      name: 'fork_steer',
+      name: 'fork_send',
       description: '给你家族里的一条会话发一条消息（等价于对它调用 steer）。'
         + '它在当前 step 结束后读到你的消息并据此改变方向，不需要中止它。'
         + '典型用途：你在 digest 里看到某条后台会话正在做的事已经过时，用它改向。'

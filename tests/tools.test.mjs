@@ -54,7 +54,7 @@ const execWith = (agentId) => ({ agent: { id: agentId }, signal: new AbortContro
 
 test('注册三个工具且名字不变（用户要求不改名）', () => {
   const { tools } = harness()
-  assert.deepEqual(tools.map(tool => tool.name), ['fork_list', 'fork_steer', 'fork_cancel'])
+  assert.deepEqual(tools.map(tool => tool.name), ['fork_list', 'fork_send', 'fork_cancel'])
 })
 
 test('每个工具都有 output.schema 与 render，且 description 足够长', () => {
@@ -82,7 +82,7 @@ test('无 agent 上下文时三个工具都拒绝或返回空，且不触碰依�
   const noAgent = { signal: new AbortController().signal }
 
   assert.deepEqual(await byName.fork_list.execute({}, noAgent), { related: [] })
-  const steered = await byName.fork_steer.execute({ sessionId: UPSTREAM, text: 'x' }, noAgent)
+  const steered = await byName.fork_send.execute({ sessionId: UPSTREAM, text: 'x' }, noAgent)
   const cancelled = await byName.fork_cancel.execute({ sessionId: UPSTREAM }, noAgent)
 
   assert.equal(steered.ok, false)
@@ -93,7 +93,7 @@ test('无 agent 上下文时三个工具都拒绝或返回空，且不触碰依�
 test('调用者 id 被原样传给依赖（授权过滤在依赖侧按它执行）', async () => {
   const { byName, calls } = harness()
   await byName.fork_list.execute({}, execWith('session-me'))
-  await byName.fork_steer.execute({ sessionId: UPSTREAM, text: '改方向' }, execWith('session-me'))
+  await byName.fork_send.execute({ sessionId: UPSTREAM, text: '改方向' }, execWith('session-me'))
   await byName.fork_cancel.execute({ sessionId: UPSTREAM }, execWith('session-me'))
 
   assert.deepEqual(calls.related, ['session-me'])
@@ -115,8 +115,8 @@ test('fork_cancel 的 keepInbox 缺省为 false，显式 true 才透传', async 
 
 test('参数收敛：缺失/null 变空串，非字符串走 String()', async () => {
   const { byName, calls } = harness()
-  await byName.fork_steer.execute({}, execWith('me'))
-  await byName.fork_steer.execute({ sessionId: 42, text: null }, execWith('me'))
+  await byName.fork_send.execute({}, execWith('me'))
+  await byName.fork_send.execute({ sessionId: 42, text: null }, execWith('me'))
 
   assert.deepEqual(calls.steer, [
     { caller: 'me', targetId: '', text: '' },
@@ -126,7 +126,7 @@ test('参数收敛：缺失/null 变空串，非字符串走 String()', async ()
 
 test('null/undefined 不得变成字面量 "null"/"undefined"', async () => {
   const { byName, calls } = harness()
-  await byName.fork_steer.execute({ sessionId: undefined, text: undefined }, execWith('me'))
+  await byName.fork_send.execute({ sessionId: undefined, text: undefined }, execWith('me'))
   const sent = calls.steer.at(-1)
   assert.equal(sent.targetId, '')
   assert.equal(sent.text, '')
@@ -193,14 +193,14 @@ test('家族状态三态互斥：活着但空闲显示"空闲"，不得与"运�
   }
 })
 
-test('fork_steer / fork_list 的描述必须讲清通道语义与"无回执"', () => {
+test('fork_send / fork_list 的描述必须讲清通道语义与"无回执"', () => {
   const tools = createBranchTools({
     defineTool: spec => spec,
     related: () => [],
     steer: () => ({ ok: true, detail: '' }),
     cancel: () => ({ ok: true, detail: '' }),
   })
-  const steer = tools.find(tool => tool.name === 'fork_steer')
+  const steer = tools.find(tool => tool.name === 'fork_send')
   const list = tools.find(tool => tool.name === 'fork_list')
   assert.match(steer.description, /唯一的显式通信通道/)
   assert.match(steer.description, /普通回复不会传到对方/)
@@ -209,7 +209,7 @@ test('fork_steer / fork_list 的描述必须讲清通道语义与"无回执"', (
   assert.match(list.description, /查看入口/, 'fork_list 要说明自己是"看进展"的地方')
 })
 
-test('fork_steer 的 block 与 exec.signal 必须透传给依赖，并声明合作式超时预算', async () => {
+test('fork_send 的 block 与 exec.signal 必须透传给依赖，并声明合作式超时预算', async () => {
   // 阻塞语义落在宿主侧（index.mjs）的依赖实现里，工具层只负责把三者原样传下去：
   // `block`（要不要等）、`signal`（调用方中止时立刻 settle）、以及 `timeoutMs` 元数据
   // （官方 `dsh-tool-call-timeout-policy` 据此强制；声明它 == 承诺观察 exec.signal）。
@@ -224,7 +224,7 @@ test('fork_steer 的 block 与 exec.signal 必须透传给依赖，并声明合�
     cancel: () => ({ ok: true, detail: '' }),
     steerCeilingMs: 660_000,
   })
-  const tool = tools.find(candidate => candidate.name === 'fork_steer')
+  const tool = tools.find(candidate => candidate.name === 'fork_send')
   const controller = new AbortController()
 
   await tool.execute({ sessionId: 'session-b', text: 'hi' }, { agent: { id: 'me' }, signal: controller.signal })

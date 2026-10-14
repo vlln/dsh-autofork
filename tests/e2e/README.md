@@ -122,7 +122,7 @@ append**，就会把 `assistant(tool_calls)` 与它的 `tool/result` 拆开 —�
 ⚠️ mock **不校验**消息顺序，所以这脚本复现的是"**顺序被写坏**"这个事实本身；
 把它变成 400 的是真实 provider。两臂都断言 `mirrorAfterToolResult` 与 `turnEndReason`。
 
-### ④ `fork_steer(block:true)` 真的会等（`steer-block-live.mjs`，**需要真凭据**）
+### ④ `fork_send(block:true)` 真的会等（`steer-block-live.mjs`，**需要真凭据**）
 
 上面三台都用 mock；这一台**用真模型**，因为 `block` 要验的正是"阻塞等待"这件事，而 mock 那台
 在本机接不上（见下）。跑法：
@@ -134,7 +134,7 @@ E2E_MODEL=deepseek-v4.1-flash-expires-on-0910 node steer-block-live.mjs
 
 判据（全部取自**盘上日志**，不靠流）：
 
-1. 某条会话以 `block:true` 调了 `fork_steer`；
+1. 某条会话以 `block:true` 调了 `fork_send`；
 2. 它的 `tool/result` 里带回对方**那一轮的最后一条回复**（不是"还没结束/等待被中断"这类兜底）；
 3. 调用与结果之间**有时间间隔**（真的等了）；
 4. **对方在等待窗口内收到那条"中途指令"**（`call.time ≤ steer.time ≤ result.time`）——

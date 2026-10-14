@@ -235,7 +235,7 @@ export const DEFAULT_PARAMS = {
    * "**旧 session 执行完成后的结果会注入返回给新 session**"（前台从后台学进展），
    * 而"新 session 的回复灌回旧 session"没有任何用途 —— 用户实测看到的是：A 跑完把结果
    * 注入给 B，B 因此产生一句回复，那句回复又被回灌成 A 里的一行 `branch-answer`，
-   * 纯属噪声。前台要给后台下指令应当走 `fork_steer`（agent 主动），而不是自动回灌。
+   * 纯属噪声。前台要给后台下指令应当走 `fork_send`（agent 主动），而不是自动回灌。
    *
    * 设为 true 保留为对照（也用于验证"悬空工具调用窗口不能乱插消息"那条 E2E 两臂对照）。
    */
@@ -279,20 +279,20 @@ export const DEFAULT_PARAMS = {
   noticeSummaries: true,
 
   // ---- 调度面 ----
-  /** 是否向前台 agent 暴露 fork_list / fork_steer / fork_cancel 三个调度工具。 */
+  /** 是否向前台 agent 暴露 fork_list / fork_send / fork_cancel 三个调度工具。 */
   exposeDispatchTools: true,
 
   /**
-   * `fork_steer` 的 `block:true` 最多等多久（毫秒）。
+   * `fork_send` 的 `block:true` 最多等多久（毫秒）。
    *
-   * `fork_steer` 默认一发即走；`block:true` 时它要**等对方那一轮跑完**再把对方的最后一条回复
+   * `fork_send` 默认一发即走；`block:true` 时它要**等对方那一轮跑完**再把对方的最后一条回复
    * 作为工具结果返回。等多久必须有上限——否则对方在跑一个长任务时，调用方那一轮会一直挂着。
    * 超时不是失败：消息已经投递，结果文本会说明"还在跑"，让调用方改用 `fork_list` 看进展。
    *
    * 上限另有一条硬顶（工具声明的 `timeoutMs`，见 index.mjs），所以即使这里配得很大，
    * 官方的工具调用超时策略仍会兜住。下限 50ms 只是防呆。
    */
-  forkSteerBlockTimeoutMs: 600_000,
+  forkSendBlockTimeoutMs: 600_000,
 
 
   // ---- 诊断 ----
