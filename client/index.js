@@ -539,12 +539,12 @@ window.__ModuleLoader__.load({
         facts.badge + '　' + facts.label,
         '会话：' + node.sessionId,
         '状态：' + stateLine(facts),
-        facts.trigger === '' ? '触发指令：—（家族根是用户自己开的会话）' : '触发指令：' + facts.trigger,
+        facts.trigger === '' ? '触发指令：—（家族根）' : '触发指令：' + facts.trigger,
         node.at === null || node.at === undefined
           ? '分叉于：—'
           : '分叉于：' + (facts.clock === '' ? '' : facts.clock)
             + (facts.rel === '' ? '' : '（' + facts.rel + '）'),
-        facts.isCurrent ? '这就是你当前所在的会话' : '点击这张卡切到那条会话',
+        facts.isCurrent ? '当前会话' : '点击切过去',
       ].join('\n')
     }
 
@@ -701,20 +701,20 @@ window.__ModuleLoader__.load({
           style: { display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '0' },
         }, [
           detailRow('会话', node.sessionId),
-          detailRow('触发指令', facts.trigger === '' ? '—（家族根是用户自己开的会话）' : facts.trigger, {
+          detailRow('触发指令', facts.trigger === '' ? '—（家族根）' : facts.trigger, {
             quote: facts.trigger !== '',
           }),
           detailRow('分叉于', node.at === null || node.at === undefined
             ? '—'
             : (facts.clock + (facts.rel === '' ? '' : ' · ' + facts.rel))),
           (facts.isCurrent || facts.isDriver)
-            ? detailRow('位置', value(facts.isCurrent ? '你在这里' : '现在回答你的是它'))
+            ? detailRow('位置', value(facts.isCurrent ? '你在这里' : '它在回答你'))
             : null,
         ]),
         React.createElement('div', {
           key: 'foot',
           style: { fontSize: '11.5px', color: TOKEN.labelTertiary },
-        }, facts.isCurrent ? '这就是你当前所在的会话' : '点击这张卡切到那条会话'),
+        }, facts.isCurrent ? '当前会话' : '点击切过去'),
       ])
     }
 
@@ -1229,13 +1229,13 @@ window.__ModuleLoader__.load({
         value: 'auto',
         label: '自动分叉',
         tagline: '触发即分叉',
-        hint: '忙的时候你提交的指令立刻在新会话里开始执行，旧会话留在后台把活干完、结果回注过来。',
+        hint: '立刻在新会话里开始执行；旧会话留在后台跑完，结果回注过来。',
       },
       {
         value: 'manual',
         label: '手动分叉',
         tagline: '分不分由你点',
-        hint: '指令照常排队；在队列那条指令右侧点「分叉」才分叉，什么时候分由你决定。',
+        hint: '指令先排队；在队列那一行点「分叉」才分叉。',
       },
     ]
 
@@ -1402,7 +1402,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
           chip(
             'save',
-            disabled ? '只读' : '改动即时生效',
+            disabled ? '只读' : '即时生效',
             disabled ? TOKEN.labelSecondary : TOKEN.accent,
             disabled ? 'rgba(127, 127, 127, 0.14)' : 'rgba(11, 107, 203, 0.12)',
           ),
@@ -1411,7 +1411,7 @@ window.__ModuleLoader__.load({
         React.createElement('div', {
           key: 'intro',
           style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelSecondary },
-        }, 'agent 正忙时，你新提交的指令是立刻换一条会话来回答你，还是先排队、由你决定什么时候分叉。'),
+        }, 'agent 忙时，你的新指令是立刻换一条会话回答，还是先排队等你决定。'),
         // ③ 选项卡：两列（窄了自动折成一列）
         React.createElement('div', {
           key: 'options',
@@ -1431,11 +1431,9 @@ window.__ModuleLoader__.load({
             onChoose: choose,
           })
         })),
-        // ④ 页脚小字：权威落点与生效方式（"改了会不会丢"这类问题在这里一次答掉）
-        React.createElement('div', {
-          key: 'foot',
-          style: { fontSize: '11.5px', lineHeight: '17px', color: TOKEN.labelTertiary },
-        }, '改动即时写入 profile 的 cordis.patch.yml，重启后仍然有效（本页没有保存按钮）。'),
+        // 页脚那条（"写进 profile 的 cordis.patch.yml、重启后仍在、没有保存按钮"）**已删**：
+        // 用户 2026-10 判定它是噪声——落盘位置属于**文档**，不该占设置界面的版面；
+        // 界面上只说"即时生效"这一件使用者当下需要知道的事（头部胶囊）。
         // ⑤ 写入被拒：与触发指令的引用块同一种"左侧竖线"记号，错误态也用同一套
         failed ? React.createElement('div', {
           key: 'failed',
@@ -1447,7 +1445,7 @@ window.__ModuleLoader__.load({
             borderLeft: '2px solid var(--dsw-alias-state-error-primary, #c62828)',
             paddingLeft: '8px',
           },
-        }, '刚才的改动未被接受，已回读当前值。') : null,
+        }, '改动未被接受，已回读当前值。') : null,
       ])
     }
 
@@ -1896,8 +1894,8 @@ window.__ModuleLoader__.load({
           children.push(React.createElement('div', {
             key: 'empty',
             style: Object.assign({ marginTop: '10px', maxWidth: '52ch' }, COLUMN_STYLE, HINT_STYLE),
-          }, '当它正忙（模型在生成 / 工具在执行）时你再发一条指令，就会自动分叉出新会话：'
-            + '你立刻在新的那条里继续说话，这条留在后台把活干完、结果回注过来。'))
+          }, '它正忙（模型在生成 / 工具在执行）时你再发一条指令，就会自动分叉出新会话：'
+            + '新的那条立刻接管，这条留在后台跑完并把结果回注过来。'))
         }
       }
 

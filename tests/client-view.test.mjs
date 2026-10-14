@@ -319,9 +319,9 @@ test('页签渲染：整张卡只有**一个** hover 详情，且含 session id 
 
   const head = cards.find(card => card.props['data-session-id'] === 'session-b')
   assert.match(String(head.props.title), /触发指令：把日志也改成 JSON/, '触发指令给全文（卡上是截断的）')
-  assert.match(String(head.props.title), /这就是你当前所在的会话/, '当前卡的动作提示')
+  assert.match(String(head.props.title), /当前会话/, '当前卡的动作提示')
   const root = cards.find(card => card.props['data-session-id'] === 'session-root')
-  assert.match(String(root.props.title), /点击这张卡切到那条会话/, '别的卡给"点击切换"提示')
+  assert.match(String(root.props.title), /点击切过去/, '别的卡给"点击切换"提示')
 
   view.stop()
 })

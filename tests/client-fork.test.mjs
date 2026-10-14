@@ -132,8 +132,11 @@ test('设置卡片：渲染出两种方式与说明，点「手动分叉」写�
   // 结构：这是"有层次的设置卡"，不是一行标题加一个控件。
   assert.match(text, /触发即分叉/, '每个选项要有短标签（一眼看出区别）')
   assert.match(text, /分不分由你点/)
-  assert.match(text, /改动即时生效/, '头部要说明保存语义')
-  assert.match(text, /cordis\.patch\.yml/, '页脚要说明写入位置与生效方式')
+  assert.match(text, /即时生效/, '头部要说明保存语义')
+  // **反向钉住**（用户 2026-10 判定那条页脚是噪声）：落盘位置与"要不要点保存"属于**文档**，
+  // 不该占设置界面的版面——界面上只说"即时生效"这一件当下需要知道的事。
+  assert.ok(!text.includes('cordis.patch.yml'), '设置界面不写落盘路径：\n' + text)
+  assert.ok(!text.includes('保存按钮'), '设置界面不解释"没有保存按钮"：\n' + text)
   assert.deepEqual(
     byRole(tree, 'radiogroup').map(group => group.props['aria-label']),
     ['分叉方式'],
@@ -149,7 +152,7 @@ test('设置卡片：渲染出两种方式与说明，点「手动分叉」写�
   await flush()
 
   assert.deepEqual(bundle.writes, [[{ op: 'set', path: ['forkMode'], value: 'manual' }]])
-  assert.equal(text.includes('刚才的改动未被接受'), false, '写入成功时不得显示失败提示')
+  assert.equal(text.includes('改动未被接受'), false, '写入成功时不得显示失败提示')
   bundle.stop()
 })
 
