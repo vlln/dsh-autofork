@@ -461,6 +461,24 @@ DSH 里 goal / subagent 互相传消息的卡片；② 但它们**不能各占�
 实测（真 GUI + 真进程）：重启后页签 15 节点 = 盘上 14 边 + 根；另一个进程再分叉两条 ⇒ **不重启**的
 web 视图立刻 17 节点（= 盘上 16 边 + 根），新分叉拿到 `⑂17/⑂18`。
 
+**重读的节流是自适应的**（0.7.1，`src/refresh.mjs`）：官方 JSON 后端是 per-record 布局 ⇒ 重读代价
+随家族数线性增长，而 domain 句柄**不暴露落点路径**（所以没法像缓存那样 stat 目录 mtime）。
+策略：按**上次实测耗时**调档——<10ms 维持 2s 下限（保新鲜），>60ms 翻倍退避、封顶 30s（成本优先）。
+
+**"当前会话"的判据（0.7.1，含一条自我纠错）**：客户端读 `sessions.list` 的
+`retainedBy.mainView`（`dsh-api-session-controller` 的 retain 模型）。曾以为这里有竞态
+（`replaceMain` 先 `retain(新)` 再 `release(旧)` ⇒ 切换瞬间两条都 >0 ⇒ 可能选到旧会话），
+于是改成读工作区的 `selection` 存储——**那个改动是错的**：`selection` 是
+`dsh-client-ui-workspace` 的**模块级变量**，不在服务面上（`ctx.get('uiWorkspace')` 的 own keys 只有
+`ctx|name|directoryPicker|workspaces|sessions|connecting`）⇒ 真机页签整个空掉。
+而且"竞态"本身不成立：那三步在**同一个同步块**里，外部异步轮询观察不到中间态。
+⇒ 回到原来源，并把不变量写成守卫：`mainView > 0` 出现**多于一条**时上报
+`current.multiple`（诊断通道），照旧回答第一条。
+
+**真正的教训是桩与真机不一致**：当时为了让"改用 selection"的测试通过，我给测试桩加了
+`uiWorkspace.selection`——真机上并不存在 ⇒ **测试全绿、真机空白**。桩只能暴露真实服务面上有的
+东西；这一条值得在每个客户端插件的桩里重申。
+
 **"单一来源"收敛（0.6.4，用户 2026-10 要求）**。审计出的双重路径分三类，处理方式不同：
 
 | 类 | 例子 | 处理 |
