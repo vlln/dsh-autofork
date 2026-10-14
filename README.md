@@ -130,7 +130,7 @@ agent 自己会用到的三个工具（`exposeDispatchTools: false` 可关掉）
 | `rebindNotice` | `true` | 容器模式下首次绑定 / 重绑 driver 时，在容器里插一行折叠通知 |
 | `followHead` | `true` | **是否把焦点切到新分叉**。默认 true = 立刻在跟一条空闲 agent 说话（「打破同步交互」的前提）；`false` 留作对照：只看产出、视图不移动 |
 | `instanceLabel` | `'分叉'` | 实例在会话头部实例树里的显示名 |
-| `titleMark` | `'⑂'` | 分叉会话的**命名标记**：建 head 时把标题钉成 `<标记><序号> <家族根名>`（如 `⑂1 修 GUI 卡顿`）。序号**不累加**——同族共用一个基名、各自编号，所以左侧列表里同族成组。走原生 `sessionTitle.rename()`（与手动重命名同一条路），代价是这条会话不再被自动命名。**空串 = 关闭分叉命名** |
+| `titleMark` | `'⑂'` | 分叉会话的**命名标记**：建 head 时把标题钉成 `<标记><序号> <家族根名>`（如 `⑂1 修 GUI 卡顿`）。序号**不累加**且**按家族计数**（不是按基名：同名的两个家族各算各的）——同族共用一个基名、各自编号，所以左侧列表里同族成组。走原生 `sessionTitle.rename()`（与手动重命名同一条路），代价是这条会话不再被自动命名。**空串 = 关闭分叉命名** |
 | `instanceProvider` | `'fork'` | 写进子会话 `subagent/descriptor` 的 `provider`（只用于冷恢复反查后端） |
 | `mirrorInstanceReply` | `false` | 是否把实例的回复**反向**追加进容器日志。默认关：方向错了（笔记定的是"旧会话的结果注入回新会话"），那是 `reInjectOnTurnEnd` 干的 |
 | `mirrorDelivery` | `'safe'` | 实例回复的投递方式：`'safe'` 避开悬空 `tool_calls`（必要时延到下一个 step 起点）；`'immediate'` 直接 append（**已知会写坏容器转写**，仅作对照） |
