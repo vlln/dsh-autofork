@@ -78,6 +78,217 @@ window.__ModuleLoader__.load({
     /** 本插件 Node half 的 health 路由。 */
     var HEALTH_PATH = '/api/dsh-autofork/health'
 
+    /* ============================ 界面文案字典 ============================
+     *
+     * 客户端 UI 的**唯一**文案来源（官方 `verify-client-ui-i18n` 的同一条纪律：译文只住在
+     * 字典里，展示代码只拿 `t(key, params)`；键一律点分小写、至少两段）。本 bundle 是手写
+     * 单文件产物（无构建步骤、浏览器只加载这一个脚本），所以字典就地内联，而不是官方那种
+     * `locales/` 目录。
+     *
+     * 注册走官方的 `ctx.locale.register(NS, {zh, en})`（见 apply）；`t` 由 `ctx.locale.bind(NS)`
+     * 绑定，**每次调用现取当前语言**（官方实现保证返回的引用稳定且活跃），所以在语言切换后
+     * 无需重挂载。`locale` 服务缺席时（非 web 组合）降级成"没有 locale 就用中文"——
+     * 本插件的历史行为，界面不会变成一串键名。
+     *
+     * 参数用官方的 `{name}` 占位符（`Translate` 内置插值），拼句子一律整句入字典，
+     * 不要在代码里拼词序（中英语序相反：`3 分钟前` vs `3 min ago`）。
+     */
+    var NS = 'autofork'
+
+    var DICTS = {
+      zh: {
+        /* 页签 */
+        'view.tab.branch': '分叉',
+        'view.branch.title': '分叉家族',
+        'view.branch.summary.sessions': '{count} 条会话',
+        'view.branch.summary.running': '{count} 条在跑',
+        'view.branch.loading': '正在读取分叉关系…',
+        /* 状态与胶囊 */
+        'state.running': '运行中',
+        'state.idle': '空闲',
+        'state.suffix.here': '（你在这里）',
+        'state.suffix.driver': '（现在回答你的是它）',
+        'chip.here': '你在这里',
+        'chip.answeringYou': '在回答你',
+        /* 相对时间 */
+        'time.justNow': '刚刚',
+        'time.minutesAgo': '{count} 分钟前',
+        'time.hoursAgo': '{count} 小时前',
+        'time.daysAgo': '{count} 天前',
+        /* 树卡 */
+        'card.badge.root': '根',
+        'card.name.fallback': '会话 {id}',
+        'card.trigger': '触发：{trigger}',
+        'mute.switchLabel': '自动回注',
+        /* 卡片详情纯文本（aria-label / 非 web 的原生 title） */
+        'detail.session': '会话：',
+        'detail.state': '状态：',
+        'detail.trigger': '触发指令：',
+        'detail.takeover': '接管：已接手原会话 {id}',
+        'detail.mute': '自动回注：',
+        'detail.mute.off': '关（它跑完不再自动把结果投给它派生出的会话）',
+        'detail.mute.on': '开（它跑完会把最后一条结果自动投给它派生出的会话）',
+        'detail.forkedAt': '分叉于：',
+        'detail.familyRoot': '（家族根）',
+        'detail.relativeWrap': '（{rel}）',
+        /* 空值占位 */
+        'placeholder.none': '—',
+        'placeholder.noneFamilyRoot': '—（家族根）',
+        /* hover 详情面板的行标签 */
+        'panel.session': '会话',
+        'panel.takeover': '接管',
+        'panel.takeover.value': '已接手原会话 {id}',
+        'panel.trigger': '触发指令',
+        'panel.forkedAt': '分叉于',
+        /* 接管 */
+        'takeover.action': '接手原会话',
+        'takeover.state.pending': '接管中…',
+        'takeover.state.confirmed': '接管已确认',
+        'takeover.state.active': '已接手原会话',
+        'takeover.aria': '{label}：{name} 接手 {parentId}',
+        'takeover.confirm.body': '确认由 B：{child}\n接手 A：{parent}？\n\nA 不会被中止，仍继续运行；之后的指令交给 B。\nA 的自动回传目标改为 B，仍受 A 的「自动回注」开关控制。\n这是接管原会话，不是切换自动回注开关。',
+        'takeover.error.noConfirm': '当前环境无法显示确认，请在浏览器中重试',
+        'takeover.error.receiptMismatch': '接管回执不匹配，请刷新确认状态',
+        'takeover.error.failed': '{name} 接管失败：{error}',
+        /* 手动分叉：队列行按钮 */
+        'fork.button.idle': '分叉',
+        'fork.button.busy': '分叉中…',
+        'fork.button.failed': '分叉失败，可再点一次',
+        'fork.button.aria': '分叉这条排队中的指令：{preview}',
+        /* 消息卡 */
+        'card.title.notice': '分叉通知',
+        'card.title.digest': '在飞进度',
+        'card.title.reply': '后台会话回复',
+        'card.title.steer': '会话消息',
+        'card.title.fallback': '消息',
+        'card.awaitReply': '等待回复',
+        'card.sender.inline': '来自 {id}',
+        'card.sender.body': '来自会话 {id}',
+        /* 通用 */
+        'common.unknown': '未知',
+        'common.sessionName': '会话（{id}）',
+        'common.sessionLabel': '{name}（{id}）',
+        /* 设置卡片（Plugins 页「分叉方式」） */
+        'settings.title': '分叉方式',
+        'settings.summary.unavailable': '设置不可用',
+        'settings.summary.current': '当前：{mode}',
+        'settings.unavailable.note': '读不到宿主提供的 dsh-autofork 配置项 —— 通常发生在插件于运行中被安装/卸载/更新之后（宿主半边仍是旧进程里的那一份）。重启 dsh 后这里恢复。',
+        'settings.readonly': '只读',
+        'settings.intro': 'agent 忙时，你的新指令是立刻换一条会话回答，还是先排队等你决定。',
+        'settings.failed': '改动未被接受，已回读当前值。',
+        'settings.mode.auto.label': '自动分叉',
+        'settings.mode.auto.tagline': '触发即分叉',
+        'settings.mode.auto.hint': '指令立刻在新会话里开始执行。',
+        'settings.mode.manual.label': '手动分叉',
+        'settings.mode.manual.tagline': '分不分由你点',
+        'settings.mode.manual.hint': '指令先排队；在队列那一行点「分叉」才分叉。',
+      },
+      en: {
+        /* Tab */
+        'view.tab.branch': 'Forks',
+        'view.branch.title': 'Fork family',
+        'view.branch.summary.sessions': '{count} sessions',
+        'view.branch.summary.running': '{count} running',
+        'view.branch.loading': 'Loading fork relationships…',
+        /* State and chips */
+        'state.running': 'Running',
+        'state.idle': 'Idle',
+        'state.suffix.here': ' (you are here)',
+        'state.suffix.driver': ' (this one is answering you)',
+        'chip.here': 'You are here',
+        'chip.answeringYou': 'Answering you',
+        /* Relative time */
+        'time.justNow': 'just now',
+        'time.minutesAgo': '{count} min ago',
+        'time.hoursAgo': '{count} h ago',
+        'time.daysAgo': '{count} d ago',
+        /* Family-tree card */
+        'card.badge.root': 'root',
+        'card.name.fallback': 'Session {id}',
+        'card.trigger': 'Trigger: {trigger}',
+        'mute.switchLabel': 'Auto-report',
+        /* Card detail plain text (aria-label / native title outside web) */
+        'detail.session': 'Session: ',
+        'detail.state': 'State: ',
+        'detail.trigger': 'Trigger: ',
+        'detail.takeover': 'Takeover: took over {id}',
+        'detail.mute': 'Auto-report: ',
+        'detail.mute.off': 'off (its result is no longer sent to the sessions it created, once it finishes)',
+        'detail.mute.on': 'on (its last result is sent to the sessions it created, once it finishes)',
+        'detail.forkedAt': 'Forked at: ',
+        'detail.familyRoot': '(family root)',
+        'detail.relativeWrap': '({rel})',
+        /* Empty-value placeholders */
+        'placeholder.none': '—',
+        'placeholder.noneFamilyRoot': '— (family root)',
+        /* Hover detail panel row labels */
+        'panel.session': 'Session',
+        'panel.takeover': 'Takeover',
+        'panel.takeover.value': 'Took over {id}',
+        'panel.trigger': 'Trigger',
+        'panel.forkedAt': 'Forked at',
+        /* Takeover */
+        'takeover.action': 'Take over',
+        'takeover.state.pending': 'Taking over…',
+        'takeover.state.confirmed': 'Takeover confirmed',
+        'takeover.state.active': 'Took over',
+        'takeover.aria': '{label}: {name} takes over {parentId}',
+        'takeover.confirm.body': 'Confirm B: {child}\ntakes over A: {parent}?\n\nA is not stopped and keeps running; later instructions go to B.\nA reports back to B instead, still governed by A\'s "Auto-report" switch.\nThis takes over the original session; it does not toggle the auto-report switch.',
+        'takeover.error.noConfirm': 'This environment cannot show a confirmation dialog; retry in a browser',
+        'takeover.error.receiptMismatch': 'Takeover receipt did not match; refresh to confirm the state',
+        'takeover.error.failed': '{name}: takeover failed: {error}',
+        /* Manual fork: queue-row button */
+        'fork.button.idle': 'Fork',
+        'fork.button.busy': 'Forking…',
+        'fork.button.failed': 'Fork failed; you can click again',
+        'fork.button.aria': 'Fork this queued instruction: {preview}',
+        /* Message cards */
+        'card.title.notice': 'Fork notice',
+        'card.title.digest': 'In-flight progress',
+        'card.title.reply': 'Background session reply',
+        'card.title.steer': 'Session message',
+        'card.title.fallback': 'Message',
+        'card.awaitReply': 'Awaiting reply',
+        'card.sender.inline': 'from {id}',
+        'card.sender.body': 'From session {id}',
+        /* Shared */
+        'common.unknown': 'unknown',
+        'common.sessionName': 'Session ({id})',
+        'common.sessionLabel': '{name} ({id})',
+        /* Settings card (Plugins page "Fork mode") */
+        'settings.title': 'Fork mode',
+        'settings.summary.unavailable': 'Settings unavailable',
+        'settings.summary.current': 'Current: {mode}',
+        'settings.unavailable.note': 'Cannot read the dsh-autofork configuration provided by the host — usually because the plugin was installed, removed, or updated while running (the host half is still the copy from the old process). Restart dsh to recover.',
+        'settings.readonly': 'Read-only',
+        'settings.intro': 'When the agent is busy, should your new instruction be answered right away in another session, or queue up until you decide?',
+        'settings.failed': 'The change was not accepted; the current value was re-read.',
+        'settings.mode.auto.label': 'Autofork',
+        'settings.mode.auto.tagline': 'Fork on trigger',
+        'settings.mode.auto.hint': 'The instruction starts running in a new session right away.',
+        'settings.mode.manual.label': 'Manual fork',
+        'settings.mode.manual.tagline': 'You decide',
+        'settings.mode.manual.hint': 'The instruction queues first; it forks only when you click "Fork" on the queue row.',
+      },
+    }
+
+    /** 当前生效语言（回传给 Node half 用；`locale` 缺席时按中文）。 */
+    var activeLang = 'zh'
+
+    /**
+     * 翻译：默认走内联中文（`locale` 服务缺席时的降级），`apply` 里换成官方的活跃绑定。
+     * @param {string} key 字典键。
+     * @param {object} [params] `{name}` 占位符的值。
+     * @returns {string} 文案；键不存在时返回键本身（可见但不崩）。
+     */
+    var t = function (key, params) {
+      var template = DICTS[activeLang]?.[key] ?? DICTS.zh[key] ?? key
+      if (params === undefined) return template
+      return template.replace(/\{(\w+)\}/g, function (match, name) {
+        return Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match
+      })
+    }
+
     /**
      * 手动分叉的动作路由（Node half 注册）。**必须带 `FORK_HEADER`**：自定义头让跨站
      * 请求需要 CORS 预检，而服务端不回应预检 ⇒ 任何网页都无法对本地端口发起本动作
@@ -95,7 +306,8 @@ window.__ModuleLoader__.load({
       publish(Object.assign({}, snapshot, { takeoverRevision: (snapshot.takeoverRevision || 0) + 1 }))
     }
     function sessionName(node, id) {
-      return (node && (node.label || node.title) || '会话') + '（' + id + '）'
+      var name = node && (node.label || node.title)
+      return name ? t('common.sessionLabel', { name: name, id: id }) : t('common.sessionName', { id: id })
     }
     async function requestTakeover(sessionId) {
       var node = snapshot.nodes.find(function (item) { return item.sessionId === sessionId })
@@ -105,12 +317,9 @@ window.__ModuleLoader__.load({
       var parent = snapshot.nodes.find(function (item) { return item.sessionId === node.parentId })
       var childName = sessionName(node, sessionId)
       var parentName = sessionName(parent, node.parentId)
-      var message = '确认由 B：' + childName + '\n接手 A：' + parentName + '？\n\n'
-        + 'A 不会被中止，仍继续运行；之后的指令交给 B。\n'
-        + 'A 的自动回传目标改为 B，仍受 A 的「自动回注」开关控制。\n'
-        + '这是接管原会话，不是切换自动回注开关。'
+      var message = t('takeover.confirm.body', { child: childName, parent: parentName })
       try {
-        if (typeof window.confirm !== 'function') throw new Error('当前环境无法显示确认，请在浏览器中重试')
+        if (typeof window.confirm !== 'function') throw new Error(t('takeover.error.noConfirm'))
         if (window.confirm(message) !== true) return
         takeoverRequests.set(sessionId, { pending: true })
         takeoverChanged()
@@ -121,10 +330,10 @@ window.__ModuleLoader__.load({
         })
         var body = await response.json()
         if (response.ok !== true || body?.ok !== true) throw new Error(body?.error || 'http-' + response.status)
-        if (body.sessionId !== sessionId || body.parentId !== node.parentId) throw new Error('接管回执不匹配，请刷新确认状态')
+        if (body.sessionId !== sessionId || body.parentId !== node.parentId) throw new Error(t('takeover.error.receiptMismatch'))
         takeoverRequests.set(sessionId, { success: true })
       } catch (error) {
-        takeoverRequests.set(sessionId, { error: childName + ' 接管失败：' + String(error.message || error) })
+        takeoverRequests.set(sessionId, { error: t('takeover.error.failed', { name: childName, error: String(error.message || error) }) })
       }
       takeoverChanged()
     }
@@ -161,14 +370,16 @@ window.__ModuleLoader__.load({
      */
     var VIEW_ATTR = 'data-dsh-autofork-view'
 
-    /** 标记 → 卡片标题（`source.autofork`，宿主 half 与这里必须一字不差）。 */
+    /** 标记 → 卡片标题的**字典键**（`source.autofork`，宿主 half 与这里的标记必须一字不差）。
+     * 键而不是文案：标题在渲染时经 `t()` 现取，所以切语言后台上的卡片标题跟着变。
+     * 门禁 4 校验标记集合与这里的键一一对应，并检查每个键在两种语言里都有值。 */
     var CARD_TITLES = {
-      notice: '分叉通知',
-      digest: '在飞进度',
-      reply: '后台会话回复',
+      notice: 'card.title.notice',
+      digest: 'card.title.digest',
+      reply: 'card.title.reply',
       // `steer`（跨会话消息，工具名 `fork_send`）：家族里**任意两条**都能互发，所以标题用中性的
       // 「会话消息」，不用"指令/控制"那套词（用户 2026-10：这条通道已经不是上游对下游的控制了）。
-      steer: '会话消息',
+      steer: 'card.title.steer',
     }
 
     /** 回退条容器的 DOM 属性。 */
@@ -188,6 +399,31 @@ window.__ModuleLoader__.load({
           headers: { accept: 'application/json' },
         }).catch(function () { /* 回报失败本身不必再报 */ })
       } catch (error) { /* fetch 不可用时静默：诊断面不得反过来弄坏主体 */ }
+    }
+
+    /**
+     * 回传给 Node half 的界面语言（`lang` 查询参数）。Node half 的用户可见文案靠它选词：
+     * 语言偏好只在浏览器侧最终确定（用户没显式选过时按浏览器语言），宿主读设置文档只能
+     * 看到**显式选择**，所以"客户端在场就由客户端说了算"。
+     * 轮询是常驻的（1s），所以这里只改一个变量，下一次 tick 自然带上。
+     */
+    var relayedLang = 'zh'
+
+    /**
+     * 语言切换时的重注册钩子（由「分叉」页签那段注册；null = 此刻没注册）。
+     * 页签的 `label` 是官方在重算 tab 列表时调用的，而重算只在**槽变更**时发生
+     * ⇒ 语言变了要主动重注册一次，否则页签标题会停在旧语言。
+     * @type {null | (() => void)}
+     */
+    var onLocaleChanged = null
+
+    /**
+     * 记下界面语言；只有白名单（zh/en）改变它。
+     * @param {string} lang `ctx.locale` 快照的 active。
+     * @returns {void}
+     */
+    function relayLanguage(lang) {
+      relayedLang = lang === 'en' ? 'en' : 'zh'
     }
 
     /**
@@ -300,8 +536,9 @@ window.__ModuleLoader__.load({
      * 自相矛盾）。这里把它压成一个标签，颜色只用一种语义。
      */
     var STATE_META = {
-      running: { text: '运行中', color: TOKEN.accent, tint: 'rgba(11, 107, 203, 0.12)' },
-      idle: { text: '空闲', color: TOKEN.labelSecondary, tint: 'rgba(127, 127, 127, 0.14)' },
+      // 文案是**键**（渲染时经 `t()` 现取，切语言即时生效）；颜色与底色与语言无关。
+      running: { text: 'state.running', color: TOKEN.accent, tint: 'rgba(11, 107, 203, 0.12)' },
+      idle: { text: 'state.idle', color: TOKEN.labelSecondary, tint: 'rgba(127, 127, 127, 0.14)' },
       // 没有 finished：它不该被渲染（`showState` 只在 live 时为真）。
     }
 
@@ -317,11 +554,11 @@ window.__ModuleLoader__.load({
       if (typeof at !== 'number' || at <= 0) return ''
       var diff = Math.max(0, now - at)
       var minutes = Math.floor(diff / 60000)
-      if (minutes < 1) return '刚刚'
-      if (minutes < 60) return String(minutes) + ' 分钟前'
+      if (minutes < 1) return t('time.justNow')
+      if (minutes < 60) return t('time.minutesAgo', { count: minutes })
       var hours = Math.floor(minutes / 60)
-      if (hours < 24) return String(hours) + ' 小时前'
-      return String(Math.floor(hours / 24)) + ' 天前'
+      if (hours < 24) return t('time.hoursAgo', { count: hours })
+      return t('time.daysAgo', { count: Math.floor(hours / 24) })
     }
 
     /**
@@ -557,7 +794,7 @@ window.__ModuleLoader__.load({
         ? node.label
         : (typeof node.title === 'string' && node.title !== ''
           ? node.title
-          : '会话 ' + shortId(node.sessionId))
+          : t('card.name.fallback', { id: shortId(node.sessionId) }))
       var ordinal = typeof node.ordinal === 'number' && node.ordinal > 0 ? node.ordinal : 0
       return {
         isRoot: isRoot,
@@ -572,10 +809,10 @@ window.__ModuleLoader__.load({
          */
         live: node.state === 'running' || node.state === 'idle',
         meta: STATE_META[node.state] === undefined
-          ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
+          ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent', raw: true }
           : STATE_META[node.state],
         label: label,
-        badge: node.kind === 'fork' ? '⑂' : (isRoot ? '根' : '⑂' + String(ordinal)),
+        badge: node.kind === 'fork' ? '⑂' : (isRoot ? t('card.badge.root') : '⑂' + String(ordinal)),
         takeoverActive: node.takeoverActive === true,
         trigger: typeof node.trigger === 'string' ? node.trigger : '',
         /** **这条会话自己**的自动回注开关（宿主按会话下发；见 `sessionMuted`）。 */
@@ -591,8 +828,10 @@ window.__ModuleLoader__.load({
      * @returns {string} 例如 `空闲（你在这里）`。
      */
     function stateLine(facts) {
-      return facts.meta.text
-        + (facts.isCurrent ? '（你在这里）' : (facts.isDriver ? '（现在回答你的是它）' : ''))
+      // `meta.text` 来自 STATE_META 时是**字典键**；未知状态那条是服务端原样值（`raw`），不翻译。
+      var state = facts.meta.raw === true ? facts.meta.text : t(facts.meta.text)
+      return state
+        + (facts.isCurrent ? t('state.suffix.here') : (facts.isDriver ? t('state.suffix.driver') : ''))
     }
 
     /**
@@ -602,19 +841,21 @@ window.__ModuleLoader__.load({
      * @returns {string} 多行纯文本。
      */
     function detailText(node, facts) {
+      var none = t('placeholder.none')
       return [
         facts.badge + '　' + facts.label,
-        '会话：' + node.sessionId,
+        t('detail.session') + node.sessionId,
         // 只有"活着"才报状态；不在本进程时**整行不出现**（不是写成"未运行"——那是噪声）。
-        ...(facts.live === true ? ['状态：' + stateLine(facts)] : []),
-        facts.trigger === '' ? '触发指令：—' + (facts.isRoot ? '（家族根）' : '') : '触发指令：' + facts.trigger,
-        ...(facts.takeoverActive ? ['接管：已接手原会话 ' + node.parentId] : []),
-        '自动回注：' + (facts.muted ? '关（它跑完不再自动把结果投给它派生出的会话）'
-          : '开（它跑完会把最后一条结果自动投给它派生出的会话）'),
-        node.at === null || node.at === undefined
-          ? '分叉于：—'
-          : '分叉于：' + (facts.clock === '' ? '' : facts.clock)
-            + (facts.rel === '' ? '' : '（' + facts.rel + '）'),
+        ...(facts.live === true ? [t('detail.state') + stateLine(facts)] : []),
+        t('detail.trigger') + (facts.trigger === ''
+          ? none + (facts.isRoot ? t('detail.familyRoot') : '')
+          : facts.trigger),
+        ...(facts.takeoverActive ? [t('detail.takeover', { id: node.parentId })] : []),
+        t('detail.mute') + (facts.muted ? t('detail.mute.off') : t('detail.mute.on')),
+        t('detail.forkedAt') + (node.at === null || node.at === undefined
+          ? none
+          : (facts.clock === '' ? '' : facts.clock)
+            + (facts.rel === '' ? '' : t('detail.relativeWrap', { rel: facts.rel }))),
       ].join('\n')
     }
 
@@ -759,7 +1000,7 @@ window.__ModuleLoader__.load({
               textOverflow: 'ellipsis',
             },
           }, facts.label),
-          facts.live ? chip('state', facts.meta.text, facts.meta.color, facts.meta.tint) : null,
+          facts.live ? chip('state', facts.meta.raw === true ? facts.meta.text : t(facts.meta.text), facts.meta.color, facts.meta.tint) : null,
         ]),
         React.createElement('div', {
           key: 'sep',
@@ -769,13 +1010,15 @@ window.__ModuleLoader__.load({
           key: 'rows',
           style: { display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '0' },
         }, [
-          detailRow('会话', node.sessionId),
-          facts.takeoverActive ? detailRow('接管', '已接手原会话 ' + node.parentId) : null,
-          detailRow('触发指令', facts.trigger === '' ? (facts.isRoot ? '—（家族根）' : '—') : facts.trigger, {
+          detailRow(t('panel.session'), node.sessionId),
+          facts.takeoverActive ? detailRow(t('panel.takeover'), t('panel.takeover.value', { id: node.parentId })) : null,
+          detailRow(t('panel.trigger'), facts.trigger === ''
+            ? (facts.isRoot ? t('placeholder.noneFamilyRoot') : t('placeholder.none'))
+            : facts.trigger, {
             quote: facts.trigger !== '',
           }),
-          detailRow('分叉于', node.at === null || node.at === undefined
-            ? '—'
+          detailRow(t('panel.forkedAt'), node.at === null || node.at === undefined
+            ? t('placeholder.none')
             : (facts.clock + (facts.rel === '' ? '' : ' · ' + facts.rel))),
           // `位置` 那行**已删**（用户 2026-10：卡片上已经写了「你在这里」/「在回答你」两枚胶囊，
           // 详情里再说一遍是重复）。注意 `aria-label` 里的 `（你在这里）` **保留**——屏幕阅读器
@@ -797,10 +1040,12 @@ window.__ModuleLoader__.load({
      * @param {string} text 模型可见正文。
      * @returns {string} 呈现用正文。
      */
-    function cardBody(text, offset) {
-      // **按宿主给的偏移量切片，不解析前缀语法**（用户 2026-10 的"单一信息"）：两个 half 各写一份
-      // "前缀长什么样"就是双重路径，格式一改就静默失配。偏移量缺失/越界时原样显示（老消息的
-      // `source` 里没有这个字段，它们会带着前缀——这是历史痕迹，不做模糊猜测）。
+    function cardBody(text, offset, body) {
+      // **正文优先用宿主单独给的 `body`**：宿主的前缀文案是**可翻译的**（跟界面语言走），
+      // 所以"前缀长度"这个偏移量在语言切换后会变——拿它切正文会切错（静默改变卡片内容）。
+      // `bodyOffset` 只作为**旧消息**的兼容路径保留（升级前写下的那些 `source` 里只有偏移量），
+      // 那种消息带着前缀显示是历史痕迹，不做模糊猜测。
+      if (typeof body === 'string' && body !== '') return body
       return typeof offset === 'number' && offset > 0 && offset < text.length ? text.slice(offset) : text
     }
 
@@ -834,7 +1079,9 @@ window.__ModuleLoader__.load({
       var showState = facts.live === true
       var takeover = takeoverRequests.get(node.sessionId) || {}
       var takeoverControl = node.kind === 'fork' && (node.canTakeover === true || facts.takeoverActive || takeover.success || takeover.pending)
-      var takeoverLabel = facts.takeoverActive ? '已接手原会话' : (takeover.success ? '接管已确认' : (takeover.pending ? '接管中…' : '接手原会话'))
+      var takeoverLabel = facts.takeoverActive ? t('takeover.state.active')
+        : (takeover.success ? t('takeover.state.confirmed')
+          : (takeover.pending ? t('takeover.state.pending') : t('takeover.action')))
 
       var navigate = function () { if (!isCurrent) navTo(node.sessionId) }
       return React.createElement('div', {
@@ -941,7 +1188,7 @@ window.__ModuleLoader__.load({
             tabIndex: 0,
             'data-mute-toggle': node.sessionId,
             'aria-checked': facts.muted ? 'false' : 'true',
-            'aria-label': '自动回注',
+            'aria-label': t('mute.switchLabel'),
             onClick: function (event) {
               if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
               toggle(!facts.muted)
@@ -999,7 +1246,7 @@ window.__ModuleLoader__.load({
               overflow: 'hidden',
               textOverflow: 'ellipsis',
             },
-          }, trigger === '' ? '' : '触发：' + trigger),
+          }, trigger === '' ? '' : t('card.trigger', { trigger: trigger })),
           React.createElement('span', {
             key: 'at',
             style: { flex: 'none', fontSize: '11.5px', lineHeight: '15px', color: TOKEN.caption },
@@ -1009,8 +1256,8 @@ window.__ModuleLoader__.load({
           key: 'foot',
           style: { marginTop: 'auto', display: 'flex', alignItems: 'center', gap: '6px', minWidth: '0' },
         }, [
-          showState ? chip('state', meta.text, meta.color, meta.tint) : null,
-          isCurrent && !takeoverControl ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+          showState ? chip('state', meta.raw === true ? meta.text : t(meta.text), meta.color, meta.tint) : null,
+          isCurrent && !takeoverControl ? chip('here', t('chip.here'), TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
           takeoverControl ? (facts.takeoverActive || takeover.success
             ? React.createElement('span', {
               key: 'takeover', role: 'status', 'data-takeover-state': node.sessionId,
@@ -1020,7 +1267,7 @@ window.__ModuleLoader__.load({
               key: 'takeover', type: 'button', 'data-takeover': node.sessionId,
               disabled: takeover.pending === true,
               'aria-busy': takeover.pending === true,
-              'aria-label': takeoverLabel + '：' + sessionName(node, node.sessionId) + ' 接手 ' + node.parentId,
+              'aria-label': t('takeover.aria', { label: takeoverLabel, name: sessionName(node, node.sessionId), parentId: node.parentId }),
               onClick: function (event) {
                 event.stopPropagation()
                 requestTakeover(node.sessionId)
@@ -1037,7 +1284,7 @@ window.__ModuleLoader__.load({
             ? React.createElement('span', {
               key: 'driver',
               style: { flex: 'none', fontSize: '11.5px', lineHeight: '17px', color: TOKEN.labelSecondary },
-            }, '在回答你')
+            }, t('chip.answeringYou'))
             : null,
         ]),
       ])
@@ -1241,7 +1488,8 @@ window.__ModuleLoader__.load({
 
       // 提示文案：官方同级按钮是「编辑 / 删除 / 转向」这种一个词，所以常态也只给「分叉」；
       // 这条指令本身是什么，交给 aria-label（读屏能听全，视觉上不占位）。
-      var tooltip = phase === 'busy' ? '分叉中…' : (phase === 'failed' ? '分叉失败，可再点一次' : '分叉')
+      var tooltip = phase === 'busy' ? t('fork.button.busy')
+        : (phase === 'failed' ? t('fork.button.failed') : t('fork.button.idle'))
       var icon = typeof primitives.IconBranchOutlineRegular === 'function'
         ? React.createElement(primitives.IconBranchOutlineRegular, { size: 14 })
         // 拿不到官方图标时用分支符号顶上：字号与图标同量级，几何形状不受影响。
@@ -1250,7 +1498,7 @@ window.__ModuleLoader__.load({
       var attributes = {
         type: 'button',
         className: 'dsh-autofork-fork',
-        'aria-label': '分叉这条排队中的指令：' + props.preview,
+        'aria-label': t('fork.button.aria', { preview: props.preview }),
         disabled: phase === 'busy',
         onClick: submit,
       }
@@ -1384,21 +1632,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 两种方式的**选项卡文案**：每个选项三行——名字（`自动分叉`）、短标签（`触发即分叉`）、
+     * 两种方式的**选项卡文案键**：每个选项三行——名字（`自动分叉`）、短标签（`触发即分叉`）、
      * 一句话说明。短标签与说明分层给：前者用来"一眼看出区别"，后者用来"搞清细节"。
+     * 存**键**而不是文案：概览行（`当前：…`）与卡片都在渲染时经 `t()` 现取，切语言即时生效。
      */
     var MODE_CARDS = [
       {
         value: 'auto',
-        label: '自动分叉',
-        tagline: '触发即分叉',
-        hint: '指令立刻在新会话里开始执行。',
+        label: 'settings.mode.auto.label',
+        tagline: 'settings.mode.auto.tagline',
+        hint: 'settings.mode.auto.hint',
       },
       {
         value: 'manual',
-        label: '手动分叉',
-        tagline: '分不分由你点',
-        hint: '指令先排队；在队列那一行点「分叉」才分叉。',
+        label: 'settings.mode.manual.label',
+        tagline: 'settings.mode.manual.tagline',
+        hint: 'settings.mode.manual.hint',
       },
     ]
 
@@ -1483,7 +1732,7 @@ window.__ModuleLoader__.load({
                 lineHeight: '18px',
                 color: TOKEN.labelPrimary,
               },
-            }, option.label),
+            }, t(option.label)),
             React.createElement('span', {
               key: 'tagline',
               style: {
@@ -1491,14 +1740,14 @@ window.__ModuleLoader__.load({
                 lineHeight: '18px',
                 color: selected ? TOKEN.accent : TOKEN.labelTertiary,
               },
-            }, option.tagline),
+            }, t(option.tagline)),
             // 「当前」那枚胶囊已删（用户 2026-10：冗余——选中态已由描边 + 淡品牌底 + 圆点三处
             // 同时表达，再挂一枚同样的字只是重复）。
           ]),
           React.createElement('div', {
             key: 'hint',
             style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelSecondary },
-          }, option.hint),
+          }, t(option.hint)),
         ]),
       ])
     }
@@ -1540,8 +1789,8 @@ window.__ModuleLoader__.load({
         : 'auto'
       // `summary` 视图：官方包页那行摘要——直接报**当前值**，比罗列两个选项名有用。
       if (props.view === 'summary') {
-        if (unavailable) return '设置不可用'
-        return '当前：' + (current === 'manual' ? '手动分叉' : '自动分叉')
+        if (unavailable) return t('settings.summary.unavailable')
+        return t('settings.summary.current', { mode: t(current === 'manual' ? 'settings.mode.manual.label' : 'settings.mode.auto.label') })
       }
 
       if (unavailable) {
@@ -1563,11 +1812,11 @@ window.__ModuleLoader__.load({
           React.createElement('span', {
             key: 'title',
             style: { fontSize: '13px', fontWeight: '600', lineHeight: '20px', color: TOKEN.labelPrimary },
-          }, '分叉方式'),
+          }, t('settings.title')),
           React.createElement('span', {
             key: 'note',
             style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelSecondary },
-          }, '读不到宿主提供的 dsh-autofork 配置项 —— 通常发生在插件于运行中被安装/卸载/更新之后（宿主半边仍是旧进程里的那一份）。重启 dsh 后这里恢复。'),
+          }, t('settings.unavailable.note')),
         ])
       }
 
@@ -1606,22 +1855,22 @@ window.__ModuleLoader__.load({
           React.createElement('span', {
             key: 'title',
             style: { fontSize: '13px', fontWeight: '600', lineHeight: '20px', color: TOKEN.labelPrimary },
-          }, '分叉方式'),
+          }, t('settings.title')),
           React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
           // 「即时生效」那枚胶囊已删（用户 2026-10：与交互本身重复——点一下就看到选中态变了，
           // 不需要再用文字说一遍）。**「只读」保留**：那是异常态，也是"为什么点不动"的唯一线索。
-          disabled ? chip('save', '只读', TOKEN.labelSecondary, 'rgba(127, 127, 127, 0.14)') : null,
+          disabled ? chip('save', t('settings.readonly'), TOKEN.labelSecondary, 'rgba(127, 127, 127, 0.14)') : null,
         ]),
         // ② 导语：这一节到底在决定什么
         React.createElement('div', {
           key: 'intro',
           style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelSecondary },
-        }, 'agent 忙时，你的新指令是立刻换一条会话回答，还是先排队等你决定。'),
+        }, t('settings.intro')),
         // ③ 选项卡：两列（窄了自动折成一列）
         React.createElement('div', {
           key: 'options',
           role: 'radiogroup',
-          'aria-label': '分叉方式',
+          'aria-label': t('settings.title'),
           style: {
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
@@ -1650,7 +1899,7 @@ window.__ModuleLoader__.load({
             borderLeft: '2px solid var(--dsw-alias-state-error-primary, #c62828)',
             paddingLeft: '8px',
           },
-        }, '改动未被接受，已回读当前值。') : null,
+        }, t('settings.failed')) : null,
       ])
     }
 
@@ -1775,7 +2024,7 @@ window.__ModuleLoader__.load({
       var [open, setOpen] = React.useState(false)
       var Icon = primitives.IconPaperPlaneOutlineRegular ?? primitives.IconBranchOutlineRegular
       var Chevron = primitives.IconChevronDownOutlineRegular
-      var title = CARD_TITLES[data.marker] ?? '消息'
+      var title = t(CARD_TITLES[data.marker] ?? 'card.title.fallback')
       var sender = typeof data.sender === 'string' ? data.sender : ''
       var clock = ''
       try {
@@ -1794,20 +2043,20 @@ window.__ModuleLoader__.load({
       // 「等待回复」：`warn` 色（比中性色更醒目，但明确不是错误），描述这条消息的属性——
       // 发送方是以 `block:true` 发的；它超时放弃后胶囊仍在（这是历史属性，不是实时状态）。
       data.awaitReply === true
-        ? chip('await', '等待回复', 'var(--dsw-alias-state-warn-primary, #b8860b)', 'rgba(184, 134, 11, 0.12)')
+        ? chip('await', t('card.awaitReply'), 'var(--dsw-alias-state-warn-primary, #b8860b)', 'rgba(184, 134, 11, 0.12)')
         : null,
       // `steer` 的**发送方是会变的**（家族里任意一条都可能发来），所以折叠行就带出来；另外三种卡
       // 的发送方恒定（就是分叉出来的那条），展开后正文里有 `来自会话 …`，不必再占标题行。
       data.marker === 'steer' && sender !== ''
-        ? React.createElement('span', { 'data-part': 'sender-inline' }, '来自 ' + shortId(sender))
+        ? React.createElement('span', { 'data-part': 'sender-inline' }, t('card.sender.inline', { id: shortId(sender) }))
         : null,
       clock === '' ? null : React.createElement('time', { 'data-part': 'time' }, clock),
       Chevron === undefined ? null : React.createElement(Chevron, { 'data-part': 'chevron', size: 12 }))
       var body = open === false ? null : React.createElement('div', { 'data-part': 'body' },
-        React.createElement('p', { 'data-part': 'sender' }, '来自会话 ' + (data.sender === '' ? '未知' : data.sender)),
+        React.createElement('p', { 'data-part': 'sender' }, t('card.sender.body', { id: data.sender === '' ? t('common.unknown') : data.sender })),
         // 正文 = 模型可见文本（剥掉卡片已表达过的前缀，见 `cardBody` 与上面的原则）。
         React.createElement('div', { 'data-part': 'content' },
-          cardBody(typeof data.text === 'string' ? data.text : '', data.bodyOffset)))
+          cardBody(typeof data.text === 'string' ? data.text : '', data.bodyOffset, data.body)))
       return React.createElement('section', {
         [CARD_ATTR]: data.marker,
         'data-open': open ? '' : undefined,
@@ -1866,8 +2115,10 @@ window.__ModuleLoader__.load({
                 // 发送方在等回复（`fork_send(block:true)`）⇒ 标题行挂「等待回复」胶囊，
                 // 免得收方会话"收下但不回"（用户 2026-10）。
                 awaitReply: event.data.source.awaitReply === true,
-                /** 正文里发送方前缀的长度（宿主给；见 `cardBody`）。 */
+                /** 正文里发送方前缀的长度（宿主给；**旧消息的兼容路径**，见 `cardBody`）。 */
                 bodyOffset: typeof event.data.source.bodyOffset === 'number' ? event.data.source.bodyOffset : 0,
+                /** 纯正文（不含发送方前缀）：宿主单独给，语言无关。 */
+                body: typeof event.data.source.bodyText === 'string' ? event.data.source.bodyText : '',
                 text: (event.data.content ?? [])
                   .filter(function (part) { return part?.type === 'text' })
                   .map(function (part) { return part.text })
@@ -2068,15 +2319,15 @@ window.__ModuleLoader__.load({
       if (nodes.length === 0) {
         // 只在"快照此刻没有家族数据"的那一帧出现（切换会话 / 首次轮询未回）。页签本身
         // 只在家族里真有分叉时才注册（见 `familyHasForks`），所以空态不是常态。
-        children.push(React.createElement('div', { key: 'loading', style: HINT_STYLE }, '正在读取分叉关系…'))
+        children.push(React.createElement('div', { key: 'loading', style: HINT_STYLE }, t('view.branch.loading')))
       } else {
         var running = nodes.filter(function (node) { return node.state === 'running' }).length
         // 一行说完：几条会话、几条还在跑。原来那句"点任意一行切到那条会话；缩进表示它是从哪条
         // 分出去的"是纯操作说明（用户反馈"文字太多"）——行本身就是按钮、缩进也看得出来，所以
         // 删掉；`还没有分叉` 那句也随页签显隐一起去掉（用户 2026-10：没有分叉时页签根本不出现，
         // 留着的唯一效果是在"切到一条孤立会话"的那一帧里说一句与当前会话不符的话）。
-        var summary = [String(nodes.length) + ' 条会话']
-        if (running > 0) summary.push(String(running) + ' 条在跑')
+        var summary = [t('view.branch.summary.sessions', { count: nodes.length })]
+        if (running > 0) summary.push(t('view.branch.summary.running', { count: running }))
         children.push(React.createElement('div', {
           key: 'summary',
           style: Object.assign({
@@ -2089,7 +2340,7 @@ window.__ModuleLoader__.load({
           React.createElement('div', {
             key: 'a',
             style: { fontWeight: '600', fontSize: '13px', color: TOKEN.labelPrimary },
-          }, '分叉家族'),
+          }, t('view.branch.title')),
           React.createElement('div', {
             key: 'b',
             style: { color: TOKEN.labelTertiary, fontSize: '12px' },
@@ -2217,6 +2468,33 @@ window.__ModuleLoader__.load({
       var slots = ctx.get('slots')
       var uiWorkspace = ctx.get('uiWorkspace')
       if (sessions === undefined) return
+
+      // 界面文案：注册字典并把 `t` 换成官方的活跃绑定（每次调用现取当前语言 ⇒ 切语言
+      // 无需重挂载）。走**嵌套** inject：`locale` 缺席的组合里界面保持中文降级，
+      // 而不是把整条客户端插件拦掉（严格注入两个方向都会出事，见 SKILL.md Step 2）。
+      ctx.inject(['locale'], function (localeCtx) {
+        var locale = localeCtx.get('locale')
+        if (locale === undefined || typeof locale.bind !== 'function') return
+        localeCtx.effect(function () {
+          return locale.register(NS, DICTS)
+        }, 'dsh-autofork: dictionaries')
+        t = locale.bind(NS)
+        // 把界面语言回传给 Node half（它的用户可见文案用它选词，见 src/locale.mjs）。
+        // 语言切换时立刻重发一次，不等下一次轮询。
+        localeCtx.effect(function () {
+          var push = function () {
+            var snapshot = typeof locale.getSnapshot === 'function' ? locale.getSnapshot() : undefined
+            var lang = snapshot && typeof snapshot.active === 'string' ? snapshot.active : 'zh'
+            var changed = lang !== activeLang
+            activeLang = lang
+            relayLanguage(lang)
+            // 语言真的变了：让页签重注册一次，官方随即重算 tab 列表（label 每次调用现取）。
+            if (changed && typeof onLocaleChanged === 'function') onLocaleChanged()
+          }
+          push()
+          return typeof locale.subscribe === 'function' ? locale.subscribe(push) : undefined
+        }, 'dsh-autofork: locale relay')
+      })
 
       /**
        * 切到另一条会话。**唯一入口是 `ctx.uiWorkspace.openSession(target)`。**
@@ -2531,7 +2809,7 @@ window.__ModuleLoader__.load({
        */
       function poll(sessionId) {
         if (stopped) return
-        var url = HEALTH_PATH + '?client=1&consume=1&sessionId=' + encodeURIComponent(sessionId)
+        var url = HEALTH_PATH + '?client=1&consume=1&lang=' + relayedLang + '&sessionId=' + encodeURIComponent(sessionId)
         fetch(url, { headers: { accept: 'application/json' } })
           .then(function (response) { return response.ok ? response.json() : undefined })
           .then(function (body) {
@@ -2624,7 +2902,7 @@ window.__ModuleLoader__.load({
                 name: 'conversation.view',
                 id: 'branch',
                 order: 20,
-                label: function () { return '分叉' },
+                label: function () { return t('view.tab.branch') },
                 inject: function () { return {} },
               }, BranchView)
               report('view.shown')
@@ -2634,9 +2912,17 @@ window.__ModuleLoader__.load({
               report('view.hidden')
             }
           }
+          // 语言切换 → 重注册一次该条目（官方只认槽变更才会重算 tab 列表，见 onLocaleChanged）。
+          onLocaleChanged = function () {
+            if (disposeEntry === null) return
+            disposeEntry()
+            disposeEntry = null
+            sync()
+          }
           var unsubscribe = subscribe(sync)
           sync()
           return function () {
+            onLocaleChanged = null
             unsubscribe()
             if (disposeEntry !== null) {
               disposeEntry()

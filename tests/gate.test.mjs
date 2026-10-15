@@ -12,7 +12,7 @@ async function withFixture(run) {
   const root = await mkdtemp(join(tmpdir(), 'autofork-gate-test-'))
   try {
     for (const directory of ['scripts', 'src', 'client', 'docs']) await mkdir(join(root, directory))
-    for (const file of ['scripts/gate.mjs', 'src/params.mjs', 'index.mjs', 'client/index.js', 'README.md', 'docs/configuration.md', 'package.json']) {
+    for (const file of ['scripts/gate.mjs', 'src/params.mjs', 'src/locale.mjs', 'src/tools.mjs', 'index.mjs', 'client/index.js', 'README.md', 'docs/configuration.md', 'package.json']) {
       await copyFile(join(sourceRoot, file), join(root, file))
     }
     await run(root)
@@ -59,5 +59,46 @@ test('gate: missing client entry is reported as a contract failure, not an uncau
     assert.equal(result.status, 1)
     assert.match(result.output, /门禁3.*不存在/u)
     assert.doesNotMatch(result.output, /ENOENT|TypeError/u)
+  })
+})
+
+test('gate: a key missing from one locale fails the dictionary parity rule', async () => {
+  await withFixture(async root => {
+    const clientPath = join(root, 'client/index.js')
+    const client = await readFile(clientPath, 'utf8')
+    // 删掉 en 段里的一个键（zh 仍在）——那种语言下会露出键名。
+    const mutated = client.replace(/^ {8}'state\.idle': 'Idle',\n/mu, '')
+    assert.notEqual(mutated, client, '夹具必须真的删掉一行')
+    await writeFile(clientPath, mutated)
+    const result = gate(root)
+    assert.equal(result.status, 1)
+    assert.match(result.output, /门禁5：en 缺这些键：state\.idle/u)
+  })
+})
+
+test('gate: hardcoded UI copy outside the dictionary is rejected', async () => {
+  await withFixture(async root => {
+    const clientPath = join(root, 'client/index.js')
+    const client = await readFile(clientPath, 'utf8')
+    const anchor = "var NS = 'autofork'"
+    const mutated = client.replace(anchor, `${anchor}\n    var leaked = '会话设置'`)
+    assert.notEqual(mutated, client, '夹具必须真的注入一行')
+    await writeFile(clientPath, mutated)
+    const result = gate(root)
+    assert.equal(result.status, 1)
+    assert.match(result.output, /门禁5：字典之外出现硬编码文案/u)
+  })
+})
+
+test('gate: a placeholder that exists on one side only is rejected', async () => {
+  await withFixture(async root => {
+    const clientPath = join(root, 'client/index.js')
+    const client = await readFile(clientPath, 'utf8')
+    const mutated = client.replace("'view.branch.summary.sessions': '{count} sessions',", "'view.branch.summary.sessions': 'sessions',")
+    assert.notEqual(mutated, client, '夹具必须真的改掉那一行')
+    await writeFile(clientPath, mutated)
+    const result = gate(root)
+    assert.equal(result.status, 1)
+    assert.match(result.output, /门禁5：占位符两侧不一致：view\.branch\.summary\.sessions/u)
   })
 })

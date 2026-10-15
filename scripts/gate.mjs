@@ -186,6 +186,183 @@ if (clientRel !== undefined) {
   }
 }
 
+/* ------------------------------ 门禁 5 ------------------------------ */
+
+/**
+ * **界面文案只住在字典里**（对齐官方 `scripts/verify-client-ui-i18n.ts` 的纪律）。
+ *
+ * 客户端 half 是手写单文件 bundle（没有 `locales/` 目录），所以字典就地内联在 `DICTS`。
+ * 本门禁守这一半：
+ *
+ *  · zh / en 的**键集必须相等**（缺一个 = 那种语言下会露出键名）；
+ *  · 键必须是点分小写（≥2 段，`view.branch.title`）——官方的门禁也正是靠这个形状把
+ *    `t('a.b')` 的实参认作键而不是硬编码文案；
+ *  · 值不能是空串；同一个键两侧的 `{占位符}` 集必须一致；
+ *  · `CARD_TITLES` 里的每个标题键在两种语言里都要有（补门禁 4 只查标记名的缺口）；
+ *  · **字典区块之外不许再出现中文文案字面量**——只放行诊断串（`dsh-autofork:` /
+ *    `settings.` / `nav.` 前缀）与单字符排版符号（`　`）。
+ */
+{
+  const cjk = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/u
+  const startMatch = /^\s*var DICTS = \{\s*$/mu.exec(clientSource ?? '')
+  if (startMatch === null) {
+    failures.push('门禁5：客户端 bundle 里找不到内联的 `DICTS` 字典（界面文案的唯一来源）')
+  } else {
+    const lines = clientSource.split('\n')
+    const startLine = clientSource.slice(0, startMatch.index).split('\n').length - 1
+    let endLine = -1
+    for (let i = startLine + 1; i < lines.length; i += 1) {
+      if (/^ {4}\}\s*$/u.test(lines[i])) { endLine = i; break }
+    }
+    if (endLine === -1) {
+      failures.push('门禁5：`DICTS` 字典块没有找到结束的 `}`')
+    } else {
+      /** @type {Record<string, Map<string, string>>} */
+      const locales = { zh: new Map(), en: new Map() }
+      let current = null
+      const KEY_LINE = /^\s*'([^']+)':\s*'((?:[^'\\]|\\.)*)',\s*$/u
+      for (let i = startLine + 1; i < endLine; i += 1) {
+        const line = lines[i]
+        const section = /^\s*(zh|en):\s*\{\s*$/u.exec(line)
+        if (section !== null) { current = section[1]; continue }
+        if (/^\s*\},?\s*$/u.test(line)) { current = null; continue }
+        const trimmed = line.trim()
+        if (current === null || trimmed === '' || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue
+        const key = KEY_LINE.exec(line)
+        if (key === null) {
+          failures.push(`门禁5：字典第 ${i + 1} 行不是 \`'key': 'value',\` 形状：${trimmed}`)
+          continue
+        }
+        if (!/^[a-z][a-zA-Z0-9]*(?:\.[a-zA-Z0-9]+)+$/u.test(key[1])) {
+          failures.push(`门禁5：字典键必须是点分小写（≥2 段）：${key[1]}`)
+        }
+        if (key[2].trim() === '') failures.push(`门禁5：字典值不能是空串：${key[1]}`)
+        locales[current].set(key[1], key[2])
+      }
+      const zh = locales.zh
+      const en = locales.en
+      const missingInEn = [...zh.keys()].filter(key => !en.has(key))
+      const missingInZh = [...en.keys()].filter(key => !zh.has(key))
+      if (missingInEn.length > 0) failures.push(`门禁5：en 缺这些键：${missingInEn.join(', ')}`)
+      if (missingInZh.length > 0) failures.push(`门禁5：zh 缺这些键：${missingInZh.join(', ')}`)
+      const holders = value => [...value.matchAll(/\{(\w+)\}/gu)].map(match => match[1]).sort().join(',')
+      for (const key of [...zh.keys()].filter(item => en.has(item))) {
+        if (holders(zh.get(key)) !== holders(en.get(key))) {
+          failures.push(`门禁5：占位符两侧不一致：${key}（zh:{${holders(zh.get(key))}} / en:{${holders(en.get(key))}}）`)
+        }
+      }
+      // 卡片标题键必须两种语言都在（`CARD_TITLES` 的值现在是字典键；门禁 4 只查标记名）。
+      const titles = /var CARD_TITLES = \{([\s\S]*?)\n {4}\}/u.exec(clientSource ?? '')
+      if (titles !== null) {
+        const titleKeys = [...titles[1].matchAll(/^\s*[A-Za-z][\w-]*:\s*'([^']+)'/gmu)].map(match => match[1])
+        const missing = titleKeys.filter(key => !zh.has(key) || !en.has(key))
+        if (missing.length > 0) failures.push(`门禁5：卡片标题键在字典里缺失：${missing.join(', ')}`)
+      }
+      const ALLOWED = /^(?:dsh-autofork:|settings\.|nav\.)/u
+      for (let i = 0; i < lines.length; i += 1) {
+        if (i >= startLine && i <= endLine) continue
+        const code = lines[i].replace(/\/\/.*$/u, '')
+        if (/^\s*(?:\*|\/\*)/u.test(code)) continue
+        for (const literal of code.match(/'([^'\\]|\\.)*'/gu) ?? []) {
+          if (!cjk.test(literal)) continue
+          const value = literal.slice(1, -1)
+          if (value.length <= 1 || ALLOWED.test(value)) continue
+          failures.push(`门禁5：字典之外出现硬编码文案（第 ${i + 1} 行）：${literal}`)
+        }
+      }
+      if (missingInEn.length === 0 && missingInZh.length === 0) {
+        console.log(`门禁 5 通过：文案字典 zh/en 各 ${zh.size} 键（键集 / 占位符 / 卡片标题键一致，字典外无硬编码文案）`)
+      }
+    }
+  }
+}
+
+/* ------------------------------ 门禁 6 ------------------------------ */
+
+/**
+ * **宿主半边同理**：`src/locale.mjs` 是 Node 侧用户可见文案的唯一来源，`index.mjs` /
+ * `src/tools.mjs` 里不许再出现硬编码文案。
+ *
+ * 两处**刻意例外**（都不是"用户可见文案"，写在这里免得后人当漏网之鱼）：
+ *  · `src/tools.mjs` 的工具与参数 description、`src/digest.mjs` 的注入正文 = **模型可见文本**，
+ *    官方立场是宿主侧不本地化（`command-compact` 的描述与回执都是英文）；它们留在中文，
+ *    翻译它们只会动 prompt 缓存与模型行为，不会改善用户体验；
+ *  · 日志与 effect 标签（`[dsh-autofork] …` / `dsh-autofork: …`）。
+ */
+{
+  const cjk = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/u
+  const localeSource = (() => {
+    try { return readFileSync(join(root, 'src/locale.mjs'), 'utf8') } catch { return undefined }
+  })()
+  if (localeSource === undefined) {
+    failures.push('门禁6：读不到 `src/locale.mjs`（Node 侧文案字典）')
+  } else {
+    const lines = localeSource.split('\n')
+    /** @type {Record<string, Map<string, string>>} */
+    const locales = { zh: new Map(), en: new Map() }
+    let current = null
+    const KEY_LINE = /^\s*'([^']+)':\s*'((?:[^'\\]|\\.)*)',\s*$/u
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]
+      const section = /^\s*(zh|en):\s*\{\s*$/u.exec(line)
+      if (section !== null) { current = section[1]; continue }
+      if (/^\s*\},?\s*$/u.test(line)) { current = null; continue }
+      const trimmed = line.trim()
+      if (current === null || trimmed === '' || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue
+      const key = KEY_LINE.exec(line)
+      if (key === null) {
+        failures.push(`门禁6：src/locale.mjs 第 ${i + 1} 行不是 \`'key': 'value',\` 形状：${trimmed}`)
+        continue
+      }
+      if (!/^[a-z][a-zA-Z0-9]*(?:\.[a-zA-Z0-9]+)+$/u.test(key[1])) {
+        failures.push(`门禁6：字典键必须是点分小写（≥2 段）：${key[1]}`)
+      }
+      if (key[2].trim() === '') failures.push(`门禁6：字典值不能是空串：${key[1]}`)
+      locales[current].set(key[1], key[2])
+    }
+    const missingInEn = [...locales.zh.keys()].filter(key => !locales.en.has(key))
+    const missingInZh = [...locales.en.keys()].filter(key => !locales.zh.has(key))
+    if (missingInEn.length > 0) failures.push(`门禁6：en 缺这些键：${missingInEn.join(', ')}`)
+    if (missingInZh.length > 0) failures.push(`门禁6：zh 缺这些键：${missingInZh.join(', ')}`)
+    const holders = value => [...value.matchAll(/\{(\w+)\}/gu)].map(match => match[1]).sort().join(',')
+    for (const key of [...locales.zh.keys()].filter(item => locales.en.has(item))) {
+      if (holders(locales.zh.get(key)) !== holders(locales.en.get(key))) {
+        failures.push(`门禁6：占位符两侧不一致：${key}`)
+      }
+    }
+    // `index.mjs` 与 `src/tools.mjs` 里不许再有硬编码文案（诊断串/日志除外）。
+    const ALLOWED = /^(?:dsh-autofork:|\[dsh-autofork\]|settings\.|nav\.|binding-|http-|client\.|handoff\.|fork\.|steer\.|cards\.|lineage\.|seed|title\.|answer\.|container\.|tool\.|settings\.|view\.|nav\.|reload|snapshot)/u
+    for (const file of ['index.mjs', 'src/tools.mjs']) {
+      const text = readFileSync(join(root, file), 'utf8')
+      // **模型可见文本刻意留在中文**（见本节头注释）：`description:` 的值与其 `+ '…'` 续行，
+      // 以及 `TARGET_DESC` 这类参数描述常量。它们是给模型读的 schema 文案，不进 UI 字典。
+      let skipContinuation = false
+      for (const [index, line] of text.split('\n').entries()) {
+        const code = line.replace(/\/\/.*$/u, '')
+        if (/^\s*(?:\*|\/\*)/u.test(code)) { skipContinuation = false; continue }
+        const trimmed = code.trim()
+        const isDescription = /(?:^|[^A-Za-z_])description:\s/u.test(code)
+          || /^const TARGET_DESC = /u.test(trimmed)
+        if (skipContinuation) {
+          // 续行以 `+` 开头（`description: '…'\n + '…'`）；不是续行就结束跳过区间。
+          if (trimmed.startsWith('+')) continue
+          skipContinuation = false
+        }
+        if (isDescription) { skipContinuation = true; continue }
+        for (const literal of code.match(/'([^'\\]|\\.)*'|`([^`\\]|\\.)*`/gu) ?? []) {
+          if (!cjk.test(literal)) continue
+          const value = literal.slice(1, -1)
+          if (value.length <= 1 || ALLOWED.test(value)) continue
+          failures.push(`门禁6：${file} 第 ${index + 1} 行出现硬编码文案（应进 src/locale.mjs）：${literal}`)
+        }
+      }
+    }
+    if (missingInEn.length === 0 && missingInZh.length === 0) {
+      console.log(`门禁 6 通过：宿主文案字典 zh/en 各 ${locales.zh.size} 键（键集 / 占位符一致，index.mjs 与 tools.mjs 无硬编码文案）`)
+    }
+  }
+}
+
 /* ------------------------------ 结果 ------------------------------ */
 
 for (const warning of warnings) console.warn(`warn  ${warning}`)

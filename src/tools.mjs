@@ -1,3 +1,5 @@
+import { t as L } from './locale.mjs'
+
 /**
  * 分叉调度工具：head（用户面向的那条会话）用来管理它家族里的其它会话。
  *
@@ -82,24 +84,24 @@ const RESULT_SCHEMA = {
  *    渲染时**不打印任何标签**（再发消息会自动恢复它 ⇒ 对读者也不构成决策信息）。
  */
 const STATE_LABEL = {
-  running: '运行中（正在跑自己的 turn）',
-  idle: '空闲（可以立刻接话）',
+  running: 'list.state.running',
+  idle: 'list.state.idle',
   // 刻意没有 finished：不呈现（见上面的说明）。
 }
 
 export function renderRelated(_args, value) {
   const related = Array.isArray(value?.related) ? value.related : []
   if (related.length === 0) {
-    return [{ type: 'text', text: '你的家族里目前没有其它会话（没有发生过分叉，也没有被别的会话接管）。' }]
+    return [{ type: 'text', text: L('list.empty') }]
   }
   const ARROW = {
-    upstream: '↑ 我接管的',
-    downstream: '↓ 接管了我的',
+    upstream: 'list.arrow.upstream',
+    downstream: 'list.arrow.downstream',
     // 同一条会话被分叉多次时，两条分叉是**兄弟**：既不是我接管的，也没接管我。
-    sibling: '~ 同族的另一条分叉',
+    sibling: 'list.arrow.sibling',
   }
   const lines = related.map((row) => {
-    const arrow = ARROW[row.relation] ?? String(row.relation)
+    const arrow = ARROW[row.relation] === undefined ? String(row.relation) : L(ARROW[row.relation])
     // **只渲染一个状态标签**。曾经同时打 `[state]` 与 `busy` 两个字段，而它们含义不同
     // （`state` 只表示"agent 对象还在不在"、`busy` 才是实时状态），于是出现
     // `[running] 已停` 这种自相矛盾的行（用户实测报的歧义）。
@@ -107,7 +109,7 @@ export function renderRelated(_args, value) {
     const name = typeof row.title === 'string' && row.title !== '' ? `${row.title} · ` : ''
     // 有实时状态就打标签，否则**整段不出现**（不留"未运行"这类实现细节）。
     const label = STATE_LABEL[row.state]
-    return `- ${name}${String(row.sessionId)}  ${arrow}${label === undefined ? '' : '  ' + label}`
+    return `- ${name}${String(row.sessionId)}  ${arrow}${label === undefined ? '' : '  ' + L(label)}`
   })
   return [{ type: 'text', text: lines.join('\n') }]
 }
@@ -147,7 +149,7 @@ export function createBranchTools({ defineTool, related, steer, cancel, steerCei
 
   const denied = {
     ok: false,
-    detail: '该工具必须在 agent 会话内调用：无法确定调用者身份，已拒绝。',
+    detail: L('tool.denied'),
   }
 
   const TARGET_DESC = '目标会话的 id，取自 fork_list（只能是你家族里的会话）。'

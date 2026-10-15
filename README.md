@@ -16,6 +16,15 @@
 dsh plugin --profile web add github:vlln/dsh-autofork
 ```
 
+## 兼容性
+
+| dsh 版本 | 状态 |
+|---|---|
+| `0.2.0-rc.2` | ✅ 已验证：手动分叉排队与设置面（2026-10 实测） |
+| `0.1.2-rc.1` | 早期行为层证据的基线；未在 0.2.0 线复验 |
+
+换 dsh 版本后若某个能力失灵，先查 [开发说明](docs/engineering-notes.md) 的验证章节；跨基线复核前不要把旧结论当事实用。
+
 ## 使用
 
 正常聊天即可。Agent 空闲时仍在原会话回答；忙碌时收到新指令，满足分叉条件后会创建新会话并切过去，旧任务不会因此被中止。
@@ -39,6 +48,10 @@ dsh plugin --profile web add github:vlln/dsh-autofork
 <sub>以上为隔离演示环境的实际界面截图；会话内容仅用于演示。</sub>
 
 ## 更多
+
+界面与插件文案**跟随界面语言**（中文 / English）：「分叉」页签、卡片、接管按钮、设置卡片，
+以及 `fork_list` / `fork_send` / `fork_cancel` 的结果与会话里那几条进展说明。语言由界面决定
+（没在设置里选过时按浏览器语言），无需另外配置。
 
 [配置参考](docs/configuration.md) · [变更记录](CHANGELOG.md) · [反馈问题](https://github.com/vlln/dsh-autofork/issues) · [开发说明](docs/engineering-notes.md)
 

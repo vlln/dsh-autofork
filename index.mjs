@@ -44,6 +44,7 @@ import {
   shortSessionId,
 } from './src/digest.mjs'
 import { createBranchTools } from './src/tools.mjs'
+import { attachSettings, getLang, setLang, t as L } from './src/locale.mjs'
 import { createLineage } from './src/lineage.mjs'
 import { nativeDiscovery, bindingHead, takeoverError, connectedIds, parentLock } from './src/relationships.mjs'
 
@@ -175,6 +176,10 @@ const PLUGIN_SOURCE = { kind: 'plugin:dsh-autofork' }
 export function apply(ctx, config) {
   const params = resolveParams(config)
   if (!params.enabled) return
+
+  // 用户可见文案的语言：先按设置文档（没有客户端在场时的来源），客户端一上线就会用
+  // health 轮询的 `?lang=` 覆盖它（见 src/locale.mjs 的解析顺序）。
+  attachSettings(ctx)
 
   /**
    * 参数快照的对外形状：**去掉 `forkMode`**（它的当前值只走 health 的 `mode` 字段）。
@@ -635,7 +640,7 @@ export function apply(ctx, config) {
     // 并把父会话标题里的标记剥掉——两者都拿不到时给一个可读的兜底名。
     const base = stripBranchMark(titleOfLive(rootId), mark)
       ?? stripBranchMark(titleOfLive(workerSession.id), mark)
-      ?? `会话 ${shortSessionId(rootId)}`
+      ?? L('session.title.fallback', { shortId: shortSessionId(rootId) })
     // 分配序号前**强制重读**血缘：否则本进程会用陈旧快照算 max+1，撞上别的进程刚分配的号
     // （用户实测：盘上已有 ⑂9，而本进程快照最大只到 ⑂8 ⇒ 下一次分叉又叫 ⑂9）。
     await refreshLineage(true)
@@ -675,7 +680,7 @@ export function apply(ctx, config) {
     return {
       sessionId: driverId,
       self: driverId === sessionId,
-      label: driverId === sessionId ? '本会话' : driverLabel(driverId),
+      label: driverId === sessionId ? L('driver.thisSession') : driverLabel(driverId),
       busy: state === 'running',
     }
   }
@@ -898,10 +903,10 @@ export function apply(ctx, config) {
         const boundary = parent === undefined ? undefined : ctx.sessionProjections.stateOf(parent.session, 'turnBoundary')
         const start = boundary?.openTurnStartSeq
         const inFlight = start == null ? [] : events.filter(event => event.seq >= start)
-        const progress = parent === undefined ? '原会话当前不在本进程，无法读取实时进度；未恢复或启动原任务。'
-          : inFlight.length === 0 ? '原会话当前没有可读取的在飞进度。'
+        const progress = parent === undefined ? L('inject.resumeUnavailable')
+          : inFlight.length === 0 ? L('inject.noInflight')
             : renderInFlightDigest({ events: inFlight, params, siblingId: parentId })
-        child.inject(agentMessage(parentId, `用户已确认由本会话接手原会话 ${parentId}。后续用户指令转到这里；原会话继续原任务，完成后按发送方自动回注设置回传。分叉历史未改写。\n\n${progress}`, 'notice'))
+        child.inject(agentMessage(parentId, L('inject.takeoverConfirmed', { parentId, progress }), 'notice'))
       } catch (error) { debug('takeover.notice-failed', { error: String(error) }) }
       return { ok: true, parentId, sessionId: childId }
     })
@@ -1315,18 +1320,21 @@ export function apply(ctx, config) {
    * 多成员家族里只能靠 `fork_list` 猜。
    */
   /**
-   * 正文 + **前缀长度**。长度是关键：客户端要剥掉那段前缀，但**不该重新解析语法**
-   * （两个 half 各写一份"前缀长什么样"就是双重路径）。宿主是正文的产出者，由它给出偏移量，
-   * 客户端只做切片（用户 2026-10 的"单一信息"）。
+   * 正文 + **纯正文**（+ 一个只作兼容用的前缀长度）。
+   *
+   * 客户端卡片用标题行表达"来自哪条会话"，所以卡内正文要剥掉前缀。剥法**不能用字符偏移量**：
+   * 前缀是**可翻译的**（跟界面语言走），切语言后长度就变了，偏移量会把正文切掉一截（静默，
+   * 只在真机上出现）。所以宿主直接给出 `body`（语言无关），偏移量只留给**升级前写下的消息**
+   * （那些 `source` 里只有 `bodyOffset`）。
    * @param {string} senderId 发送方会话 id。
    * @param {string} text 正文。
-   * @param {string} what 消息类别（`消息`）。
-   * @param {string} [note] 括号里的附注（如 `它在等你回复`）。
-   * @returns {{text: string, prefixLength: number}} 正文与前缀长度。
+   * @param {string} what 消息类别（`inject.prefix.message`）。
+   * @param {string} [note] 括号里的附注（如"它在等你回复"，**自带括号**，来自字典）。
+   * @returns {{text: string, prefixLength: number, body: string}} 完整文本、前缀长度与纯正文。
    */
   function prefixedBody(senderId, text, what, note) {
-    const prefix = `分叉会话 ${senderId} 发来${what}${note === undefined ? '' : `（${note}）`}：`
-    return { text: prefix + text, prefixLength: prefix.length }
+    const prefix = L('inject.prefix', { senderId, what, note: note === undefined ? '' : note })
+    return { text: prefix + text, prefixLength: prefix.length, body: text }
   }
 
   /**
@@ -1347,7 +1355,8 @@ export function apply(ctx, config) {
       // 不是失败路径：只是让"新加了标记却忘了客户端标题"在开发期可见（门禁 4 兜底静态检查）。
       debug('cards.unknown-marker', { marker })
     }
-    const body = prefixedBody(senderId, text, '消息', awaitReply === true ? '它在等你回复' : undefined)
+    const body = prefixedBody(senderId, text, L('inject.prefix.message'),
+      awaitReply === true ? L('inject.prefix.awaiting') : undefined)
     return createUserMessage({
       content: [{ type: 'text', text: body.text }],
       /**
@@ -1365,8 +1374,10 @@ export function apply(ctx, config) {
         form: 'relay',
         senderSessionId: senderId,
         autofork: marker,
-        /** 正文里发送方前缀的长度：客户端按它切片（**不解析语法**，见 `prefixedBody`）。 */
+        /** 正文里发送方前缀的长度：**只作旧消息的兼容路径**（新消息用 `bodyText`，见 `prefixedBody`）。 */
         bodyOffset: body.prefixLength,
+        /** 纯正文（不含发送方前缀，语言无关）：客户端优先用它，见 `cardBody`。 */
+        bodyText: body.body,
         ...(awaitReply === true ? { awaitReply: true } : {}),
       },
     })
@@ -1610,11 +1621,13 @@ export function apply(ctx, config) {
     if (containerMode && params.rebindNotice === true) {
       try {
         session.append('user/message', contextMessage(
-          `[容器] 现在由 ${driverLabel(headId)}（会话 ${headId}）负责回答你。`
+          L('container.nowAnswering', { label: driverLabel(headId), id: headId })
             + (rebind
-              ? `前一个实例 ${driverLabel(previous?.headId ?? '')} 仍在后台跑它没做完的那一轮，不会被中止。`
-              : '它在后台工作，产出会出现在这条对话里。'),
-          rebind ? `已切换到 ${driverLabel(headId)} 回答` : `现在由 ${driverLabel(headId)} 回答`,
+              ? L('container.previousStillRunning', { label: driverLabel(previous?.headId ?? '') })
+              : L('container.workingInBackground')),
+          rebind
+            ? L('summary.switchedTo', { label: driverLabel(headId) })
+            : L('summary.nowAnswering', { label: driverLabel(headId) }),
         ), { surfaceOp: 'append' })
       } catch (error) {
         debug('container.notice-failed', { container: session.id, error: String(error) })
@@ -1629,7 +1642,7 @@ export function apply(ctx, config) {
     if (!containerMode) {
       worker.inject(contextMessage(
         renderBranchHint({ headId }),
-        `已分叉：${driverLabel(headId)} 接走了下一条消息，你继续当前的活`,
+        L('summary.forkedTo', { label: driverLabel(headId) }),
       ))
     }
 
@@ -2277,7 +2290,7 @@ export function apply(ctx, config) {
       steer: async (callerId, targetId, text, options) => {
         await refreshLineage()
         if (!isFamilyMember(callerId, targetId)) {
-          return { ok: false, detail: `"${targetId}" 不在你的家族里；先用 fork_list 查看。` }
+          return { ok: false, detail: L('tool.notInFamily', { id: targetId }) }
         }
         let target = ctx.agents.get(targetId)
         let revived = false
@@ -2287,8 +2300,7 @@ export function apply(ctx, config) {
           if (target === undefined) {
             return {
               ok: false,
-              detail: `会话 "${targetId}" 此刻无法恢复（可能正被另一个进程打开）。`
-                + ' 用 fork_list 确认它还在家族里，或先在界面上打开它。',
+              detail: L('tool.resumeFailed', { id: targetId }) + L('tool.resumeFailed.hint'),
             }
           }
           revived = true
@@ -2301,14 +2313,13 @@ export function apply(ctx, config) {
         const message = agentMessage(callerId, text, 'steer', options?.block === true)
         target.steer(message)
         // 恢复过就明说：模型该知道自己的消息**唤醒了一条不在运行的会话**（并因此会真的跑起来）。
-        const delivered = `已向 "${targetId}" 投递；它会在当前 step 结束后读到。`
-          + (revived ? '（它此前不在运行，已自动恢复。）' : '')
+        const delivered = L('tool.delivered', { id: targetId })
+          + (revived ? L('tool.revived') : '')
 
         if (options?.block !== true) {
           return {
             ok: true,
-            detail: delivered
-              + '**它不会自动回复你** —— 要答复就用 block:true 等它这一轮跑完，或稍后 fork_list 看进展。',
+            detail: delivered + L('tool.noAutoReply'),
           }
         }
 
@@ -2322,14 +2333,14 @@ export function apply(ctx, config) {
         if (outcome === 'aborted') {
           return {
             ok: false,
-            detail: delivered + '但**等待被中断**（调用方中止或工具超时）；它仍会读到这条消息。',
+            detail: delivered + L('tool.blockInterrupted'),
           }
         }
         if (outcome === 'timeout') {
           return {
             ok: true,
-            detail: delivered + `等了 ${String(Math.round(timeoutMs / 1000))} 秒它这一轮还没结束`
-              + '（可能还在跑长任务）。用 fork_list 看进展，或稍后再问它一次。',
+            detail: delivered + L('tool.blockTimeout', { seconds: Math.round(timeoutMs / 1000) })
+              + L('tool.blockTimeout.hint'),
           }
         }
         const { reply, stepCount } = lastTurnReply(target)
@@ -2344,15 +2355,15 @@ export function apply(ctx, config) {
       cancel: async (callerId, targetId, keepInbox) => {
         await refreshLineage()
         if (callerId === targetId || !controlFamily(callerId).includes(targetId)) {
-          return { ok: false, detail: `"${targetId}" 不在你的家族里；先用 fork_list 查看。` }
+          return { ok: false, detail: L('tool.notInFamily', { id: targetId }) }
         }
         const target = ctx.agents.get(targetId)
-        if (target === undefined) return { ok: false, detail: `会话 "${targetId}" 已不在运行。` }
+        if (target === undefined) return { ok: false, detail: L('tool.cancel.notRunning', { id: targetId }) }
         target.cancel(
           { kind: 'hook', reason: 'dsh-autofork: 被家族里的 head 中止' },
           { keepInbox },
         )
-        return { ok: true, detail: `已中止会话 "${targetId}"（keepInbox=${String(keepInbox)}）。` }
+        return { ok: true, detail: L('tool.cancel.done', { id: targetId, keepInbox: String(keepInbox) }) }
       },
     })
 
@@ -2386,6 +2397,10 @@ export function apply(ctx, config) {
         const consume = query.get('consume') === '1'
         const ack = query.get('ack')
         const note = query.get('note')
+        // 界面语言：客户端回传（1s 轮询）比设置文档权威——用户没显式选过语言时，宿主读设置
+        // 文档只会看到"没选"，而浏览器已经按 navigator 定下了界面语言（见 src/locale.mjs）。
+        const lang = query.get('lang')
+        if (lang !== null) setLang(lang, { relay: true })
         pruneRecords()
         // **重启后也要看得到关系**，而且**别的进程**刚做的分叉也要看到：先装载 + 节流重读一次
         // （见 `refreshLineage`），之后这次请求里的同步读取（`familyNodes` / `driverView`）才是新鲜的。
@@ -2440,6 +2455,12 @@ export function apply(ctx, config) {
           marks: { ...Object.fromEntries([...nativeEdges.keys()].filter(id => !recordByHead.has(id) && !lineage?.edgeOf(id)).map(id => [id, 0])), ...(lineage?.marks?.() ?? {}) },
           /** 标记字形（`params.titleMark`）。客户端画徽标用它，不自己硬编字形。 */
           mark: branchMark(),
+          /**
+           * 当前**生效的**界面语言（`zh`/`en`）：宿主侧用户可见文案（工具结果、注入正文、
+           * 会话标题）按它选词。它同时是这条链路的**可观测面**——客户端每 1s 用
+           * `?lang=` 回传一次，所以这里能直接看出"回传到了没、白名单过没过"。
+           */
+          lang: getLang(),
           tools: exposedToolNames,
           /**
            * 家族链条（根 → 最新，含本会话自己）：客户端「分叉」页签的数据源。

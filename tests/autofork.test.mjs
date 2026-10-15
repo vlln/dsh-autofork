@@ -476,9 +476,9 @@ test('可选能力全部走嵌套 ctx.inject，且缺席时不抛', () => {
   applyChain(ctx, undefined)
   const nested = calls.nestedInject.flat().sort()
   assert.deepEqual(nested,
-    ['agentDefaultModel', 'agentPresets', 'sessionPersistence', 'sessionTitle', 'sessions', 'sessions', 'storageDomain',
-      'tools', 'webServer', 'workspaceRegistry'],
-    '每一项都是"缺席时功能降级、但插件照常工作"的能力')
+    ['agentDefaultModel', 'agentPresets', 'sessionPersistence', 'sessionTitle', 'sessions', 'sessions', 'settings',
+      'storageDomain', 'tools', 'webServer', 'workspaceRegistry'],
+    '每一项都是"缺席时功能降级、但插件照常工作"的能力（`settings` = 读用户语言偏好；缺席时按默认中文）')
 })
 
 test('标题服务缺席 → 不命名，但分叉本身照常完成', async () => {

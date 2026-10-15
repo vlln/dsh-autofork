@@ -1,7 +1,7 @@
 {
   "name": "@vlln/dsh-autofork",
-  "version": "0.13.0",
-  "description": "DSH 插件：agent 忙时自动分叉会话 —— 你新发的指令立刻在新会话里得到响应，旧会话留在后台跑完并把结果回注。官方 bundle 插件，装：dsh plugin --profile web add github:vlln/dsh-autofork",
+  "version": "0.15.0",
+  "description": "Agent 忙时自动分叉会话：你新发的指令立刻在新会话里得到响应，旧会话留在后台跑完并把结果回注（DeepSeek Harness 插件）",
   "license": "MIT",
   "icon": "icon.svg",
   "type": "module",
@@ -13,6 +13,7 @@
     "./client": "./client/index.js",
     "./src/*": "./src/*",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
@@ -20,6 +21,7 @@
     "icon.svg",
     "client",
     "src",
+    "locale",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Autofork",
+    "description": "Fork the session when the agent is busy: your new instruction gets answered right away, and the old session keeps running in the background and reports back when it finishes."
+  }
+}

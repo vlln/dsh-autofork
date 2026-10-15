@@ -1171,3 +1171,51 @@ ln -sfn "$DSH_HOME/profiles/node_modules" <plugin>/node_modules
 **git 源安装不受影响**（pnpm 把包放进 profile 内部，parent-walk 可达）。所以只有"从本地目录开发调试"才需要上面那条 symlink。
 
 挂载后确认无 `plugin tree failed to load`，并 curl health 探针确认 `ok:true`（`ctx.logger.info` 不写 stdout，日志不是可靠判据）。
+
+## i18n（0.15.0）：两层字典 + 语言从哪来
+
+界面文案与**插件自身产生的文案**（工具结果、注入正文、容器转写行、会话标题兜底）都走字典：
+
+| 层 | 位置 | 键数 | 说明 |
+|---|---|---|---|
+| 客户端 | `client/index.js` 的 `DICTS`（**就地内联**） | 73 zh / 73 en | 手写单文件 bundle 没有 `locales/` 目录；`apply` 里 `locale.register('autofork', DICTS)` + `t = locale.bind('autofork')`（引用稳定、每次调用现取当前语言） |
+| 宿主 | `src/locale.mjs` | 32 zh / 32 en | `setLang/getLang/t` + `attachSettings(ctx)` |
+
+**语言解析顺序**（越靠前越权威）：
+
+1. **客户端回传**：既有 1s health 轮询带 `&lang=<active>`，宿主 `setLang(lang, { relay: true })`。
+   界面语言最终由浏览器决定（用户没显式选过时按 `navigator` 回退）⇒ **只有客户端知道**；
+2. **设置文档**：官方把偏好持久化成命名空间 `locale` 的 `preference`（嵌套 `ctx.inject(['settings'])` 读，
+   `describe()` 抛错也吞掉）。回传过一次后不再被它覆盖；
+3. 都没有 ⇒ `zh`（历史行为，headless 保持中文）。
+
+health 多下发 `lang`，它就是这条链路的可观测面。
+
+**刻意不翻译**：工具/schema 的 `description`、`src/digest.mjs` 的模型可见注入正文（官方立场是宿主侧
+不本地化；翻译它们只会动 prompt 缓存与模型行为）、日志与 effect 标签。
+
+### 跨半边契约的修正（会静默写坏数据的那种）
+
+曾用 `source.bodyOffset`（前缀字符数）让客户端切掉"来自哪条会话"的前缀。**前缀进字典后长度随语言变**，
+偏移量随即失真 ⇒ 卡片正文被切掉一截，且**只在真机上出现**。现在宿主下发 `source.bodyText`（纯正文，
+语言无关），`bodyOffset` 只留给升级前写下的旧消息。
+
+### 门禁与验证
+
+- **门禁 5**（客户端）/ **门禁 6**（宿主）：zh/en 键集相等、键点分小写（≥2 段）、值非空、
+  同一键两侧 `{占位符}` 集一致、`CARD_TITLES` 的键两种语言都在、**字典之外无硬编码中文文案**
+  （只放行诊断串与单字符排版符号）。自证：`tests/gate.test.mjs` 用变异夹具证明这三种违规都会被拒。
+- `npm run verify` = 语法 + 3 道门禁 + **212 项测试**（含 `tests/i18n.test.mjs`：白名单、回传优先、
+  插值/缺键回退、`attachSettings` 四种缺席形态不抛、切语言后 `fork_list` 输出真的变英文）。
+
+**真机（隔离 `DSH_HOME` + 随机端口 + 同一个 `profiles/node_modules`）**：
+
+```
+默认 lang=zh → ?lang=en ⇒ en → ?lang=fr 忽略 ⇒ en → ?lang=zh-CN ⇒ zh → ?lang=en ⇒ en
+boot 图含 @vlln/dsh-autofork 行（带 rev）；client.js 200（150917 B）
+  含 var DICTS / view.tab.branch / card.title.notice / relayLanguage / ctx.locale / bodyText
+health: ok=true, tools=[fork_list,fork_send,fork_cancel], mode=auto
+```
+
+⚠️ **未做视觉验证**：浏览器里英文界面的实际渲染、以及一次真分叉后的英文工具结果——隔离 home 没有模型
+凭据（见"开发期安装"一节）。要看需 `tests/e2e/` 的 mock 台（`DSH_MOCK_LLM_SERVER`）或拷入凭据。
