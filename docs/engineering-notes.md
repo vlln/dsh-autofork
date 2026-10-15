@@ -857,24 +857,57 @@ undefined，所以要先 `sessions.refreshProjections(parentSessionId)` 把父�
 
 ### head 是**普通顶层会话**（扁平，不挂子会话）
 
-分叉产生的 head **不是**旧会话的子代理：不设 `origin:'subagent'`、不设 `parentSession`、
-不写 `subagent/catalog`。理由：
+分叉产生的 head **不是**旧会话的子代理：不设 `origin:'subagent'`、不写 `subagent/catalog`。
+理由：
 
 - 一旦标成子会话，它就被**嵌在旧会话里面** —— 用户看到的是"A 里钻进了一个子代理"，
   **顶层容器仍然是旧会话**、内容仍然是旧会话的，于是"容器内容换成 B"永远做不到；
 - 而那就是**层级模型**（容器=管理者、分叉=下属），本插件的模型是**扁平分叉**：
   并行拉起一个新 session，与用户交互的就是它。
 
-落盘实测（head 的 header 与事件）：
+⚠️ **但 `parentSession` 必须写**（0.13.0 修的 bug）。它是**格式读取不变量**，不是层级表达——
+层级由 `origin === 'subagent'` 表达（客户端只在 `origin === 'subagent'` 时才走子会话寻址、
+面包屑与实例树）。规则在 harness 的当代格式校验器里
+（`@deepseek-ai/dsh-session-persistence-jsonl` 的 `validateStoredEvents`，逐字复述）：
+
+```js
+case 'session-log-deepseek/delivery-accepted':
+  if ((data.sessionFormatVersion ?? 0) === header.version
+      && !(header.parentSession !== undefined && event.seq < inheritedEventCount)
+      && data.sessionId !== header.id) throw new SessionFormatError('current-generation delivery marker names the wrong Session')
+```
+
+`dsh-session-log-deepseek` 在**每一轮官方 API 2xx 之后**往会话日志追加一条
+`delivery-accepted`，`data.sessionId` 是**这条会话**的 id。而 seed 是父会话已完成前缀的
+**逐字拷贝**（官方 `buildForkSeed` 也是逐字拷贝）⇒ 前缀里那些标记记的是**父会话**的 id。
+于是：**有 seed + 没有 `parentSession` = 一条写进去就再也读不出来的日志**——写入端不报错
+（活会话在内存里），**下次从盘上重新打开才炸**（重启 / 重装 / 换进程都算）：
 
 ```
-{"type":"session","version":0,"id":"session-…","cwd":"…","seedLength":5,"delegationDepth":0}
+历史加载失败：stored session "session-…" is corrupt: … SessionFormatError:
+current-generation delivery marker names the wrong Session (raw log: …/session.v4.jsonl.zstd)
+```
+
+官方普通分叉（`@deepseek-ai/dsh-api-session-controller` 的 `fork()`）正是这么写的：
+`meta: { parentSession: source.header.id, isSeeded: true }`——**没有 `origin`**。
+所以"写 `parentSession`"与"head 是普通顶层会话"并不矛盾，本插件现在与官方逐字同形。
+
+落盘实测（head 的 header 与事件；`parentSession` 指向被接管的 worker）：
+
+```
+{"type":"session","version":4,"id":"session-…","cwd":"…","parentSession":"session-…","isSeeded":true,"delegationDepth":0}
 0 turn/start 1 step/start 2 user/message(用户原话) 3 step/end 4 turn/end
 5 session/end-seed  6 permission/preset …            ← 无任何 subagent/* 事件
 ```
 
-`seedLength: 5` 是继承前缀的长度（= `inheritedEventCount`），恢复侧据此还原
-`isSeeded`；所以"重启后打不开"这类坑不存在（前提是建 head 时传了 `isSeeded: true`）。
+`parentSession` + `isSeeded` 一起交代了"这条日志的前缀是继承来的、来自谁"，恢复侧据此还原
+`inheritedEventCount` 与继承前缀的归属；所以"重启后打不开"这类坑不存在（前提是建 head 时传了
+`isSeeded: true`）。
+
+**形状的最后一道保险（实测）**：把 harness 自己的校验器（`session-persistence-jsonl` 的
+worker 入口，`{path, compression:'zstd', expectedId, expectedEventCount}`）指向一条**已损坏**
+的分叉日志，只在 header 里补上 `parentSession` 一个字段、其余字节不动 ⇒ **FAIL → OK**。
+即"这一个字段就是那条不变量"。
 
 **代价**：原生**实例树**不再列出分叉。血缘由 ①「分叉」页签、② `fork_list` 工具表达，
 **并且是持久化的**（见下节）——dsh 重启后关系仍在。

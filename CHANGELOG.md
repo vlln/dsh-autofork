@@ -3,6 +3,31 @@
 面向使用者的变更记录。本插件遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)：
 `0.x` 期间新增功能与行为变更进 **minor**（patch 只放修 bug）。
 
+## 0.13.0
+
+### 修复
+
+- **分叉出来的会话重开时加载失败**（`历史加载失败：… SessionFormatError: current-generation
+  delivery marker names the wrong Session`）。这是**写入侧**的 bug：分叉会话的 header 少了
+  `parentSession`，而这份日志的前缀是从原会话逐字继承来的，里面带着原会话的
+  `delivery-accepted` 标记；宿主只允许"声明了父会话 + 落在继承前缀内"的这类标记。
+  症状有欺骗性——分叉当时一切正常（会话活在内存里），**下次从盘上打开才炸**，重启 / 重装 /
+  换进程之后才暴露；而且只有**原会话用过官方 DeepSeek API** 的家族会中招。现在分叉会话的
+  header 与 DSH 自带 Fork 的子会话**逐字同形**（`parentSession` + `isSeeded`，不带 subagent 标记），
+  所以这类日志可以被宿主正常读取。详见[决策记录](decisions/implemented/flat-head-parent-session.md)。
+  > 已经写在盘上的那几条损坏日志**不会自愈**（header 在文件里）：本版只保证新分叉不再坏。
+- **插件设置偶尔整块空白**（用户报的"设置选项消失了"）：当宿主设置文档里没有本插件的配置项时
+  （运行中安装/卸载/更新插件后的正常中间态），设置卡从"整块不渲染"改成**渲染一行可读说明**
+  （哪一项读不到 + 重启 dsh 恢复）。空白的失败方式会把原因和恢复办法一起藏掉。详见
+  [决策记录](decisions/implemented/settings-card-unavailable-visible.md)。
+
+### 兼容
+
+- 分叉会话的 header 多了一个 `parentSession` 字段（官方普通分叉一直如此）。工具面、页签、
+  血缘存储、health 契约都没变；`fork_list` / `fork_send` / `fork_cancel` 行为不变。
+- 旧的分叉关系照旧读得回来（血缘域没动）。
+- 仍需要 **dsh ≥ 0.2.0**。
+
 ## 0.12.0
 
 ### 变更

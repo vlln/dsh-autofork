@@ -510,17 +510,25 @@ test('running + 长 step + 有已完成 turn → 抢占消息、建分叉、注�
   assert.equal(opts.seed.at(-1).type, 'turn/end', 'seed 必须结束在 turn/end')
   assert.equal(Number(opts.inheritedEventCount), 8)
   // **扁平分叉**（用户 2026-09-11 纠正）：head 是普通顶层会话，不是旧会话的子代理。
-  // 不设 origin / parentSession、不写 subagent/catalog —— 否则它被嵌在旧会话里，
+  // 不设 origin、不写 subagent/catalog —— 否则它被嵌在旧会话里，
   // 顶层容器仍是旧会话，"把容器内容换成 B"永远做不到，而且那是笔记否决的层级模型。
-  assert.deepEqual(opts.meta, { cwd: '/work', isSeeded: true })
+  //
+  // ⚠️ **但 `parentSession` 必须写**（0.13.0 修的真 bug，见 spawnHead 的 meta 注释）：
+  // 它不是层级表达（层级由 `origin === 'subagent'` 表达），而是**当代格式的读取不变量**
+  // —— seed 逐字拷贝父会话前缀，里面带着父会话的 `session-log-deepseek/delivery-accepted`
+  // 标记，校验器只允许"header 声明了父会话 + 落在继承前缀里"的异会话标记。
+  // 少了它，这条日志**写进去就再也读不出来**（用户实测报的 `历史加载失败：…
+  // current-generation delivery marker names the wrong Session`）。官方普通分叉正是
+  // `{parentSession, isSeeded}`、没有 origin。
+  assert.deepEqual(opts.meta, { cwd: '/work', parentSession: 'session-parent', isSeeded: true })
   // origin 与 catalog 条目**必须成对**（实测教训）：
   // 只设 origin 不写 catalog → 客户端停在"正在加载子代理"；
   // 只写 catalog 不设 origin → 寻址校验（history.ts:346）拒。
   // **扁平分叉**：head 不是 subagent 子会话，也不往旧会话写 catalog。
   // 标成子会话会让用户看到"我钻进了一个子代理"、而顶层容器仍是旧会话——
   // 那正是用户否掉的形态，也是笔记否决的层级模型。
-  assert.equal(opts.meta.origin, undefined, 'head 必须是普通顶层会话')
-  assert.equal(opts.meta.parentSession, undefined, '血缘不用 header 表达（那是层级）')
+  assert.equal(opts.meta.origin, undefined, 'head 必须是普通顶层会话（origin 才是层级表达）')
+  assert.equal(opts.meta.parentSession, 'session-parent', 'parentSession 是格式不变量（见上）')
   assert.equal(calls.appended.find(entry => entry.type === 'subagent/catalog'), undefined,
     '不再写 subagent/catalog')
   assert.deepEqual(opts.agentOptions, { provider: 'p', model: 'm' })
@@ -2027,16 +2035,78 @@ test('容器模式：agent 被登记成容器名下的子会话（花名册 + du
   })
 })
 
-test('扁平模式（对照）：head 是普通顶层会话，不写花名册', async () => {
+test('扁平模式（对照）：head 是普通顶层会话，不写花名册 —— 但同样声明 parentSession', async () => {
   // 链式模式要求"有在飞的 turn"，所以用默认夹具（默认投影里有 openTurnStartSeq）。
   const { ctx, calls, emitInsert } = harness()
   applyChain(ctx, undefined)
   emitInsert(userMessage())
   await flush()
   const opts = calls.agentsCreate[0]
-  assert.equal(opts.meta.origin, undefined)
-  assert.equal(opts.meta.parentSession, undefined)
+  // 两种模式的差别**只有** `origin` + 花名册/描述符；`parentSession` 两边都有，因为它是
+  // 格式读取不变量而不是层级表达（见 spawnHead 的 meta 注释与 0.13.0 的决策记录）。
+  assert.equal(opts.meta.origin, undefined, '扁平模式：不标 subagent')
+  assert.equal(opts.meta.parentSession, 'session-parent', 'parentSession 两种模式都要写')
   assert.equal(calls.appended.find(e => e.type === 'subagent/catalog'), undefined)
+})
+
+test('回归（0.13.0）：seed 里带着父会话的 delivery 标记时，head 必须声明 parentSession', async () => {
+  // 这条钉的是**别人家的不变量**，所以注释里把它的原文写全（用户 2026-10 实测报的
+  // `历史加载失败：… SessionFormatError: current-generation delivery marker names the
+  // wrong Session` 就是它崩的）：
+  //
+  //   `dsh-session-log-deepseek` 在**每一轮官方 API 2xx 之后**往会话日志追加一条
+  //   `session-log-deepseek/delivery-accepted`，`data.sessionId` 是**这条会话**的 id；
+  //   分叉的 seed 是父会话已完成前缀的**逐字拷贝** ⇒ 前缀里那些标记记的是**父会话**的 id。
+  //   harness 的当代格式校验器（`dsh-session-persistence-jsonl` 的 `validateStoredEvents`，
+  //   delivery-accepted 分支）只放行两种异会话标记：
+  //     ① `header.parentSession !== undefined` **且** `event.seq < inheritedEventCount`
+  //        （= 合法的继承前缀）；② `data.sessionId === header.id`。
+  //
+  // 所以"有 seed 但没有 parentSession"= **写进去就再也读不出来的日志**：写入端不报错
+  // （活会话在内存里），下次从盘上重新打开才炸。这个用例把那条外部不变量钉在插件自己的
+  // 输出上：只要前缀里出现异会话标记，meta 就必须有 parentSession，且玩家必须落在前缀内。
+  const events = sessionLog()
+  // 插在第一条消息**之前**（保留"它属于已完成前缀"这个前提），并把 seq 重排成稠密的。
+  events.splice(1, 0, {
+    seq: 0,
+    type: 'session-log-deepseek/delivery-accepted',
+    data: { sessionId: 'session-root', sessionFormatVersion: 4, throughSeq: 0 },
+    time: NOW - 585_000,
+  })
+  events.forEach((event, index) => { event.seq = index })
+
+  const { ctx, calls, emitInsert } = harness({
+    events,
+    // 插入一条 ⇒ 在飞 turn 的起点整体后移 1（真实日志里 seq 是稠密的）。
+    projection: {
+      openTurnStartSeq: PROJECTION.openTurnStartSeq + 1,
+      lastStepStartSeq: PROJECTION.lastStepStartSeq + 1,
+      lastStepBoundary: { kind: 'start', seq: PROJECTION.lastStepStartSeq + 1 },
+      lastTurn: PROJECTION.lastTurn,
+    },
+  })
+  applyChain(ctx, undefined)
+  emitInsert(userMessage())
+  await flush()
+
+  const opts = calls.agentsCreate[0]
+  const cut = Number(opts.inheritedEventCount)
+  const foreign = opts.seed
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.type === 'session-log-deepseek/delivery-accepted'
+      && event.data.sessionId !== opts.sessionId)
+
+  assert.ok(foreign.length > 0, '夹具必须在继承前缀里留下父会话的 delivery 标记（否则这个用例是空转）')
+  assert.ok(foreign.every(({ index }) => index < cut),
+    '异会话标记必须落在继承前缀内——落在前缀外是真正无解的那一态，本用例只覆盖合法前提')
+
+  // 校验器原样复述（与上面注释里的规则一字对应）：
+  const permitted = opts.meta.parentSession !== undefined
+    && foreign.every(({ index }) => index < cut)
+  assert.equal(permitted, true,
+    '当代 delivery 标记的放行条件必须成立：header.parentSession 必须存在')
+  assert.equal(opts.meta.parentSession, 'session-parent', '父会话就是被接管的 worker')
+  assert.equal(opts.meta.origin, undefined, '扁平模式仍然不标 origin（parentSession 不是层级表达）')
 })
 
 test('容器模式：**空闲的容器不分叉**，自己作答（笔记的触发规则）', async () => {

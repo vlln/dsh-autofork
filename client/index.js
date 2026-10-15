@@ -1509,7 +1509,8 @@ window.__ModuleLoader__.load({
      * 与官方通用设置页同一种保存语义：**改动即时写入**，没有保存按钮——官方设置页的开关与
      * 选项都是"改即落库"，只有部分页面用页脚保存。
      * @param {object} props 槽 props（`view` / `t`）加注入面（`useForkSettings` / `writeForkMode`）。
-     * @returns {any} 一行描述（`summary` 视图）、设置区，或 null（命名空间不可用）。
+     * @returns {any} 一行描述（`summary` 视图）、设置区、"设置不可用"那一行（命名空间不被宿主
+     *   服务时——**不出空壳也不出空白**），或 null（快照还没到）。
      */
     function ForkSettingsCard(props) {
       var state = props.useForkSettings(function (value) { return value })
@@ -1517,14 +1518,57 @@ window.__ModuleLoader__.load({
       var failed = pair[0]
       var setFailed = pair[1]
 
-      if (state === null || state === undefined || state.status === 'unavailable') return null
+      if (state === null || state === undefined) return null
+
+      /**
+       * `status === 'unavailable'` = 宿主的设置文档里**没有这个命名空间**
+       * （`ui-settings` 的 `ConfigFormController.derive()`：mirror 的 view 已到，但
+       * `view.namespaces` 里找不到 `dsh-autofork`）。
+       *
+       * ⚠️ **这一态必须留下可见线索，不能像以前那样 `return null`**（用户 2026-10 实测报的
+       * "原本存在的设置选项不见了"）：插件在运行中被装/卸/更新时，宿主半边可能仍是旧进程里的
+       * 那一份，于是命名空间在设置文档里缺席，而卡片**整块消失**——用户看到的是"设置没了"，
+       * 却拿不到任何提示。留一行字，至少把"去哪恢复"说清楚。
+       *
+       * 只对**已定态**的 unavailable 出字：`idle` / `loading`（mirror 还没到）仍然照常渲染，
+       * 免得刷新页面时先闪一行错误。
+       */
+      var unavailable = state.status === 'unavailable'
 
       var current = state.value !== null && state.value !== undefined && state.value.forkMode === 'manual'
         ? 'manual'
         : 'auto'
       // `summary` 视图：官方包页那行摘要——直接报**当前值**，比罗列两个选项名有用。
       if (props.view === 'summary') {
+        if (unavailable) return '设置不可用'
         return '当前：' + (current === 'manual' ? '手动分叉' : '自动分叉')
+      }
+
+      if (unavailable) {
+        return React.createElement('div', {
+          'data-dsh-autofork-settings-missing': '',
+          role: 'status',
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            maxWidth: '720px',
+            padding: '14px 16px',
+            boxSizing: 'border-box',
+            border: '1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.25))',
+            borderRadius: '12px',
+            background: 'var(--dsw-alias-bg-layer-2, transparent)',
+          },
+        }, [
+          React.createElement('span', {
+            key: 'title',
+            style: { fontSize: '13px', fontWeight: '600', lineHeight: '20px', color: TOKEN.labelPrimary },
+          }, '分叉方式'),
+          React.createElement('span', {
+            key: 'note',
+            style: { fontSize: '12px', lineHeight: '18px', color: TOKEN.labelSecondary },
+          }, '读不到宿主提供的 dsh-autofork 配置项 —— 通常发生在插件于运行中被安装/卸载/更新之后（宿主半边仍是旧进程里的那一份）。重启 dsh 后这里恢复。'),
+        ])
       }
 
       var disabled = state.writable !== true

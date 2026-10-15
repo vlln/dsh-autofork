@@ -1069,11 +1069,17 @@ export function apply(ctx, config) {
    * 这条会话是不是**实例**（而不是容器）。
    *
    * 判据用持久事实而不是内存记录，因为要能挡住"还没登记就先收到消息"的瞬间：
-   *  · 本插件建的实例：`header.parentSession` 指向容器；
-   *  · 官方 subagent：`header.origin === 'subagent'`；
+   *  · 本插件容器模式建的实例：`origin === 'subagent'`；
+   *  · 任何**声明了父会话**的会话（容器模式的实例、官方普通分叉、扁平模式建的 head
+   *    ——三者都写 `parentSession`，见 `spawnHead` 的 meta 注释）；
    *  · 兜底：它已经在 `recordByHead` 里（是本插件的某条实例）。
    *
    * 语义上就是用户那句："容器 = 你新建的那条顶层会话；实例 = 它里面的 agent"。
+   *
+   * ⚠️ **只有容器模式会问这个问题**（两处调用都在 `containerMode === true` 分支里）：
+   * 扁平模式下 head 就是用户所在的会话，判它与父会话的关系没有意义。
+   * 所以"扁平模式的 head 也命中第 2 条"在扁平模式下没有任何后果；容器模式下它
+   * 反而是正确的（那条 head 确实是父会话派生出来的子会话）。
    * @param {any} agent 待判定的 agent。
    * @returns {boolean} 是否是实例。
    */
@@ -1444,7 +1450,7 @@ export function apply(ctx, config) {
     try {
       handle = await ctx.agents.create({
         sessionId: headId,
-        // 标记方式**取决于模式**，两种模式的正确答案是相反的：
+        // 标记方式**取决于模式**，但 `parentSession` **两种模式都要写**（见下）。
         //
         // · **容器模式**（默认关闭）：agent 是**容器名下的子会话**——用户在容器 C 里，
         //   A/B 都是 C 的 agent 实例（"一条 session 持有多条 agent 的 durable 记录"，
@@ -1452,10 +1458,40 @@ export function apply(ctx, config) {
         //   所以这里必须 `origin:'subagent'` + `parentSession:C` + 写 catalog，
         //   并在 agent 自己的日志里放 `subagent/descriptor`（寻址与分类都要它）。
         // · **扁平模式**（默认）：head 自己就是用户要进去的容器，于是它必须是
-        //   **普通顶层会话**——标成子会话会让用户"钻进一个子代理"、顶层容器仍是旧会话。
+        //   **普通顶层会话**——`origin` 不写（标成子会话会让用户"钻进一个子代理"、
+        //   顶层容器仍是旧会话、`sessions.open` 也会被 durable 父地址校验拒掉）。
+        //   **但 `parentSession` 必须写**：它是**格式不变量**，不是层级表达。
         meta: {
           ...(session.header.cwd === undefined ? {} : { cwd: session.header.cwd }),
-          ...(containerMode ? { parentSession: session.id, origin: 'subagent' } : {}),
+          /**
+           * ⚠️ **不是可选的装饰，缺了这条分叉会话读盘必炸**（用户 2026-10 实测报的
+           * `历史加载失败：… SessionFormatError: current-generation delivery marker
+           * names the wrong Session`）。
+           *
+           * 规则在 harness 自己的校验器里（`dsh-session-persistence-jsonl` 的
+           * `validateStoredEvents`，`session-log-deepseek/delivery-accepted` 分支）：
+           *
+           * ```js
+           * if ((data.sessionFormatVersion ?? 0) === header.version
+           *     && !(header.parentSession !== undefined && event.seq < inheritedEventCount)
+           *     && data.sessionId !== header.id) throw …
+           * ```
+           *
+           * 也就是：**当代的 delivery 标记只有在"header 声明了父会话 + 落在继承前缀里"
+           * 时才允许记别人的会话 id**。而 seed 是父会话已完成前缀的**逐字拷贝**
+           * （官方 `buildForkSeed` 也是逐字拷贝），父会话用官方 API 跑过就会在里面留下
+           * `delivery-accepted`（`dsh-session-log-deepseek` 每一轮 2xx 后追加一条）——
+           * 那些标记记的是**父会话**的 id。于是：**有 seed + 没有 `parentSession` =
+           * 一条写进去就再也读不出来的日志**（当下不报错，因为活会话在内存里；
+           * 下次从盘上重新打开时必炸，重启、重装、换进程都算）。
+           *
+           * 官方普通分叉（`session-controller` 的 `fork()`）正是这么写的：
+           * `meta: { parentSession: source.header.id, isSeeded: true }`——**没有 `origin`**。
+           * 所以写上它与"head 是普通顶层会话"并不矛盾：`origin` 才是层级表达，
+           * 客户端只在 `origin === 'subagent'` 时才走子会话寻址/面包屑/实例树。
+           */
+          parentSession: session.id,
+          ...(containerMode ? { origin: 'subagent' } : {}),
           ...(fullSeed.length > 0 ? { isSeeded: true } : {}),
         },
         ...(fullSeed.length > 0

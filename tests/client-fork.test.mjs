@@ -159,7 +159,7 @@ test('设置卡片：渲染出两种方式与说明，点「手动分叉」写�
   bundle.stop()
 })
 
-test('设置卡片：已选中项不重复写、summary 视图给一行描述、命名空间不可用时整块不渲染', async () => {
+test('设置卡片：已选中项不重复写、summary 视图给一行描述、命名空间不可用时留一行可见线索', async () => {
   const bundle = await mountBundle({ forkMode: 'manual' })
   const entry = bundle.registry.get('plugins.bundle.config')
   const face = entry.spec.inject()
@@ -194,17 +194,40 @@ test('设置卡片：已选中项不重复写、summary 视图给一行描述、
   await flush()
   assert.deepEqual(bundle.writes, [], '点已经选中的那一项不得产生写入')
 
-  // 命名空间不被宿主服务（`configForms` 快照 status 不是 ready）：整块不渲染，不留空壳。
+  // 命名空间不被宿主服务（`configForms` 快照 status 是 unavailable）：**必须留下一行可见线索**，
+  // 不能像 0.12.0 之前那样 `return null`——用户 2026-10 实测报的"原本存在的设置选项不见了"
+  // 正是这一态，而空白页把原因和恢复办法一起藏掉了。
+  const unavailableProps = {
+    view: 'page',
+    useForkSettings: selector => selector({ status: 'unavailable', value: undefined, writable: false }),
+    writeForkMode: face.writeForkMode,
+  }
   const unavailable = bundle.stub.render({
     type: entry.component,
-    props: {
-      view: 'page',
-      useForkSettings: selector => selector({ status: 'unavailable', value: undefined, writable: false }),
-      writeForkMode: face.writeForkMode,
-    },
+    props: unavailableProps,
     children: [],
   })
-  assert.equal(unavailable, null)
+  assert.notEqual(unavailable, null, '命名空间不可用时不得整块消失')
+  const unavailableText = bundle.stub.texts(unavailable).join('\n')
+  assert.match(unavailableText, /分叉方式/, '标题还在，用户才知道消失的是哪一项设置')
+  assert.match(unavailableText, /dsh-autofork/, '要说清是哪个配置项读不到')
+  assert.match(unavailableText, /重启 dsh/, '要给出恢复动作，而不是只报错')
+  assert.equal(unavailable.props['data-dsh-autofork-settings-missing'], '', '这一态要有稳定的排障锚')
+  assert.equal(unavailable.props.role, 'status')
+  assert.deepEqual(bundle.stub.texts(unavailable).join('\n').includes('自动分叉'), false,
+    '不可用时不得假装有选项（那会让用户点了没反应）')
+  // summary 视图在这一态给一行文字（槽要求字符串，不能是元素）。
+  assert.equal(
+    bundle.stub.render({ type: entry.component, props: { ...unavailableProps, view: 'summary' }, children: [] }),
+    '设置不可用',
+  )
+
+  // 快照还没到（`idle` / `null`）仍然不渲染：免得刷新页面时先闪一行错误。
+  assert.equal(bundle.stub.render({
+    type: entry.component,
+    props: { view: 'page', useForkSettings: () => null, writeForkMode: face.writeForkMode },
+    children: [],
+  }), null)
   bundle.stop()
 })
 
