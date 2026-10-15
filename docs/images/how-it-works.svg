@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="310" viewBox="0 0 960 310" role="img" aria-labelledby="title desc">
+  <title id="title">会话分叉示意</title>
+  <desc id="desc">时间从左向右。A 正在执行任务；你提交新指令时，B 分叉接手，A 不被中止。A 完成后，将结果回传给 B。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8" fill="none" stroke="#3767bd" stroke-width="1.5"/></marker>
+    <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:18px;fill:#343a40} .note{font-size:16px;fill:#737b85}.line{fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-width:2.5}</style>
+  </defs>
+  <rect width="960" height="310" fill="#fff"/>
+  <text x="40" y="40" class="note">分叉示意</text>
+  <text x="896" y="40" text-anchor="end" class="note">时间 →</text>
+  <text x="40" y="121">会话 A</text>
+  <path d="M140 115 H835" class="line" stroke="#a0a7b0"/>
+  <circle cx="140" cy="115" r="5" fill="#737b85"/>
+  <circle cx="340" cy="115" r="5" fill="#3767bd"/>
+  <circle cx="835" cy="115" r="5" fill="#737b85"/>
+  <text x="140" y="90">执行任务</text>
+  <text x="545" y="90" text-anchor="middle">继续执行</text>
+  <text x="835" y="90" text-anchor="middle">完成</text>
+  <path d="M340 115 C340 170 410 215 450 215 H900" class="line" stroke="#3767bd"/>
+  <text x="322" y="161" text-anchor="end" fill="#3767bd">你发来新指令</text>
+  <text x="410" y="260" fill="#3767bd">会话 B · 你在这里继续对话</text>
+  <path d="M835 125 V204" class="line" stroke="#3767bd" stroke-dasharray="4 5" marker-end="url(#arrow)"/>
+  <text x="816" y="172" text-anchor="end" class="note">结果回传</text>
+</svg>

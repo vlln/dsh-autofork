@@ -1,12 +1,12 @@
 /**
- * 门禁：把两个只在挂载时才会暴露的失败模式提前到本地。
+ * 静态门禁：检查注入声明、参数文档、客户端入口及跨半边卡片契约。
  *
  * 门禁 1 —— **严格注入完整性**。0811 cordis 对未在 `inject` 声明的服务直接抛
  * `cannot get property without inject`，且 apply 开头即抛、整个 effect 不注册
- * （插件"加载了但什么都不工作"）。本机没有 DSH 实例可挂载，所以用静态检查代替：
- * `ctx.X` 用到的每个服务都必须在 `export const inject` 里。
+ * （插件"加载了但什么都不工作"）。本检查只验证声明集合，不能替代真实挂载：
+ * `ctx.X` 用到的服务须有顶层或嵌套注入声明，不验证其所在作用域及运行时可用性。
  *
- * 门禁 2 —— **参数文档不漂移**。README 的参数表是用户唯一能看到的可调面；
+ * 门禁 2 —— **参数文档不漂移**。配置参考的参数表是用户唯一能看到的可调面；
  * 它与 `DEFAULT_PARAMS` 的键集必须双向一致（缺一或多一都失败）。
  *
  * 门禁 4 —— **跨半边的卡片契约不漂移**。宿主 half 的 `CARD_MARKERS`（它能写出的 `source.autofork`
@@ -95,12 +95,12 @@ for (const name of [...declared].sort()) {
 
 /* ------------------------------ 门禁 2 ------------------------------ */
 
-const readme = readFileSync(join(root, 'README.md'), 'utf8')
-const tableStart = readme.indexOf('## 参数')
+const configuration = readFileSync(join(root, 'docs', 'configuration.md'), 'utf8')
+const tableStart = configuration.indexOf('## 参数')
 if (tableStart < 0) {
-  failures.push('门禁2：README 缺少「## 参数」章节')
+  failures.push('门禁2：配置参考缺少「## 参数」章节')
 } else {
-  const section = readme.slice(tableStart)
+  const section = configuration.slice(tableStart)
   const documented = new Set()
   for (const match of section.matchAll(/^\|\s*`([A-Za-z_$][\w$]*)`\s*\|/gmu)) {
     documented.add(match[1])
@@ -109,12 +109,12 @@ if (tableStart < 0) {
 
   for (const key of [...actual].sort()) {
     if (!documented.has(key)) {
-      failures.push(`门禁2：参数 "${key}" 在 DEFAULT_PARAMS 中但 README 参数表缺它`)
+      failures.push(`门禁2：参数 "${key}" 在 DEFAULT_PARAMS 中但 配置参考参数表缺它`)
     }
   }
   for (const key of [...documented].sort()) {
     if (!actual.has(key)) {
-      failures.push(`门禁2：README 参数表列了 "${key}"，但 DEFAULT_PARAMS 里没有（文档漂移）`)
+      failures.push(`门禁2：配置参考参数表列了 "${key}"，但 DEFAULT_PARAMS 里没有（文档漂移）`)
     }
   }
 }
@@ -123,12 +123,12 @@ if (tableStart < 0) {
 
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 const clientRel = manifest.exports?.['./client']
+let clientSource
 if (manifest.dsh?.client !== undefined && clientRel === undefined) {
   failures.push('门禁3：package.json 声明了 dsh.client，但 exports["./client"] 缺失（浏览器拿不到 bundle）')
 }
 if (clientRel !== undefined) {
   const clientPath = join(root, clientRel)
-  let clientSource
   try {
     clientSource = readFileSync(clientPath, 'utf8')
   } catch {
@@ -162,14 +162,12 @@ if (clientRel !== undefined) {
 /* ------------------------------ 门禁 4 ------------------------------ */
 
 {
-  const hostSource = readFileSync(join(root, 'index.mjs'), 'utf8')
-  const markersMatch = hostSource.match(/const CARD_MARKERS = \[([^\]]*)\]/u)
+  const markersMatch = source.match(/const CARD_MARKERS = \[([^\]]*)\]/u)
   if (markersMatch === null) {
     failures.push('门禁4：index.mjs 里找不到 `CARD_MARKERS`（宿主可写的卡片标记清单）')
   } else {
     const hostMarkers = [...markersMatch[1].matchAll(/'([^']+)'/gu)].map(match => match[1])
-    const clientSource = readFileSync(join(root, 'client', 'index.js'), 'utf8')
-    const titlesMatch = clientSource.match(/var CARD_TITLES = \{([\s\S]*?)\n    \}/u)
+    const titlesMatch = clientSource?.match(/var CARD_TITLES = \{([\s\S]*?)\n    \}/u) ?? null
     if (titlesMatch === null) {
       failures.push('门禁4：客户端的 `CARD_TITLES` 找不到（卡片标题表）')
     } else {
