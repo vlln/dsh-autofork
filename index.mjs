@@ -45,6 +45,7 @@ import {
 } from './src/digest.mjs'
 import { createBranchTools } from './src/tools.mjs'
 import { createLineage } from './src/lineage.mjs'
+import { nativeDiscovery, bindingHead, takeoverError, connectedIds, parentLock } from './src/relationships.mjs'
 
 /**
  * 「触发指令」在血缘边/UI 里的字符上限。
@@ -111,8 +112,9 @@ const HEALTH_PATH = '/api/dsh-autofork/health'
  */
 const FORK_PATH = '/api/dsh-autofork/fork'
 
-/** 家族级动作路由：改"要不要自动回注"（见 `src/lineage.mjs` 的 `families` 表）。 */
+/** 会话级动作路由：改"要不要自动回注"（`session_settings` 表）。 */
 const MUTE_PATH = '/api/dsh-autofork/mute'
+const TAKEOVER_PATH = '/api/dsh-autofork/takeover'
 
 /** 动作路由要求的自定义请求头。 */
 const FORK_HEADER = 'x-dsh-autofork'
@@ -286,10 +288,24 @@ export function apply(ctx, config) {
   let sessionTitleApi
 
   /**
-   * 活会话存储：① 取某条会话当前的标题（命名要以家族根**当时的名字**为基名）；
-   * ② 枚举活会话，给同基名的分叉接上序号（插件重载后记录丢了也不会重号）。
+   * 活会话存储：取某条会话当前的标题（命名以家族根当时的名字为基名）。
    */
   let sessionsApi
+  let persistenceApi
+  const native = nativeDiscovery({
+    live: () => sessionsApi?.list?.() ?? [],
+    stored: () => typeof persistenceApi?.list === 'function' ? () => persistenceApi.list() : undefined,
+    onError: error => debug('native.list-failed', { error: String(error) }),
+  })
+  const nativeEdges = native.edges
+  const rememberHeader = native.remember
+  const refreshNative = native.refresh
+  ctx.inject(['sessions'], capabilityCtx => {
+    sessionsApi = capabilityCtx.sessions
+    for (const session of sessionsApi?.list?.() ?? []) rememberHeader(session.header)
+    capabilityCtx.on('session/created', session => rememberHeader(session.header), { global: true })
+  })
+  ctx.inject(['sessionPersistence'], capabilityCtx => { persistenceApi = capabilityCtx.sessionPersistence })
   ctx.inject(['sessionTitle', 'sessions'], (capabilityCtx) => {
     sessionTitleApi = capabilityCtx.sessionTitle
     sessionsApi = capabilityCtx.sessions
@@ -325,9 +341,11 @@ export function apply(ctx, config) {
    */
   let lineage
   ctx.inject(['storageDomain'], (capabilityCtx) => {
-    lineage = createLineage(capabilityCtx.storageDomain, debug)
+    const handle = createLineage(capabilityCtx.storageDomain, debug)
+    lineage = handle
     capabilityCtx.effect(() => () => {
-      void lineage?.close?.()
+      if (lineage === handle) lineage = undefined
+      void handle.close()
     }, 'dsh-autofork: 关闭血缘存储域')
   })
 
@@ -354,6 +372,7 @@ export function apply(ctx, config) {
    * @returns {Promise<void>} 完成。
    */
   async function refreshLineage(force = false) {
+    await refreshNative(force)
     if (lineage === undefined) return
     // **先等首次装载**（`ready`）：`refresh()` 在域还没 open 时会直接返回 false，不先等就会让
     // 启动后第一次读看到空血缘（这一句以前散在每个调用点，现在收在一处）。
@@ -381,7 +400,7 @@ export function apply(ctx, config) {
    * @returns {any} `{workerId, …}` 或 undefined。
    */
   function edgeOf(sessionId) {
-    return recordByHead.get(sessionId) ?? lineage?.edgeOf(sessionId)
+    return recordByHead.get(sessionId) ?? lineage?.edgeOf(sessionId) ?? nativeEdges.get(sessionId)
   }
 
   /**
@@ -400,6 +419,9 @@ export function apply(ctx, config) {
     }
     for (const headId of lineage?.headsOf(sessionId) ?? []) {
       if (!heads.includes(headId)) heads.push(headId)
+    }
+    for (const [id, edge] of nativeEdges) {
+      if (edge.workerId === sessionId && !heads.includes(id)) heads.push(id)
     }
     // 兄弟按建分叉时间升序：树的行顺序必须稳定（内存记录与持久化边的插入顺序不同，
     // 不排就会"每次重启画的树都不一样"）。
@@ -648,11 +670,7 @@ export function apply(ctx, config) {
    */
   function driverView(sessionId) {
     pruneRecords()
-    const { downstream } = familyOf(sessionId)
-    // 下游按创建时间升序（`headsOf` 就保证了这个顺序），所以最后一条就是最新的那条 head。
-    const driverId = downstream.length === 0
-      ? sessionId
-      : downstream[downstream.length - 1]
+    const driverId = bindingHead(sessionId, bindingTarget)
     const state = stateOf(driverId)
     return {
       sessionId: driverId,
@@ -739,6 +757,10 @@ export function apply(ctx, config) {
         : full
       return {
         sessionId: item.id,
+        kind: edge === undefined ? 'root' : (edge.kind === 'fork' ? 'fork' : 'autofork'),
+        canTakeover: edge?.kind === 'fork' && bindingTarget(edge.workerId) !== item.id
+          && takeoverError(edge.workerId, item.id, bindingTarget) === undefined,
+        takeoverActive: edge !== undefined && bindingTarget(edge.workerId) === item.id,
         title: full,
         /** 显示名（去掉徽章已经表达过的 `<标记><序号> ` 前缀）；UI 用它，工具面不用。 */
         label,
@@ -811,8 +833,7 @@ export function apply(ctx, config) {
    */
   function activeFamilyCount(sessionId) {
     pruneRecords()
-    const { upstream, downstream, siblings } = familyOf(sessionId)
-    return [...upstream, ...downstream, ...siblings].filter(id => ctx.agents.get(id) !== undefined).length
+    return controlFamily(sessionId).filter(id => id !== sessionId && ctx.agents.get(id) !== undefined).length
   }
 
   /**
@@ -827,6 +848,63 @@ export function apply(ctx, config) {
     if (targetId === '' || targetId === callerId) return false
     const { upstream, downstream, siblings } = familyOf(callerId)
     return upstream.includes(targetId) || downstream.includes(targetId) || siblings.includes(targetId)
+  }
+
+  // Authority and routing do not follow descriptive ordinary-fork edges.
+  const volatileBindings = new Map()
+  function bindingTarget(id) {
+    return volatileBindings.get(id) ?? lineage?.bindingOf(id) ?? recordByWorker.get(id)?.headId
+  }
+  function controlFamily(id) {
+    const pairs = [...(lineage?.bindings() ?? [])]
+    for (const record of recordByHead.values()) pairs.push([record.workerId, record.headId])
+    // Persisted autofork edges retain their historical cancellation authority.
+    for (const item of familyOf(id).all) {
+      const edge = lineage?.edgeOf(item.id)
+      if (edge !== undefined) pairs.push([edge.workerId, item.id])
+    }
+    return connectedIds(id, pairs)
+  }
+  const withParentLock = parentLock()
+  async function takeOver(childId) {
+    await refreshNative()
+    await settleLineage()
+    const edge = nativeEdges.get(childId)
+    if (edge === undefined || recordByHead.has(childId) || lineage?.edgeOf(childId)) {
+      return { ok: false, error: 'not-native-direct-child', status: 409 }
+    }
+    const parentId = edge.workerId
+    return withParentLock(parentId, async () => {
+      const ancestors = new Set([childId])
+      let ancestor = parentId
+      while (ancestor !== undefined) {
+        if (ancestors.has(ancestor)) return { ok: false, error: 'binding-cycle', status: 409 }
+        ancestors.add(ancestor)
+        ancestor = edgeOf(ancestor)?.workerId
+      }
+      const error = takeoverError(parentId, childId, bindingTarget)
+      if (error !== undefined) return { ok: false, error, status: 409 }
+      if (bindingTarget(parentId) === childId) return { ok: true, parentId, sessionId: childId }
+      if (lineage === undefined || !await settleLineage()) return { ok: false, error: 'storage-unavailable', status: 503 }
+      const child = ctx.agents.get(childId) ?? await reviveAgent(childId)
+      if (child === undefined) return { ok: false, error: 'target-unavailable', status: 409 }
+      if (!await lineage.setBinding(parentId, childId)) return { ok: false, error: 'binding-write-failed', status: 503 }
+      volatileBindings.delete(parentId)
+      // Never resume/cancel the parent, rewrite history, or change its mute setting.
+      // Notification is best effort AFTER commit; a notification error must not report a failed selection.
+      try {
+        const parent = ctx.agents.get(parentId)
+        const events = parent?.session?.snapshotEvents?.() ?? []
+        const boundary = parent === undefined ? undefined : ctx.sessionProjections.stateOf(parent.session, 'turnBoundary')
+        const start = boundary?.openTurnStartSeq
+        const inFlight = start == null ? [] : events.filter(event => event.seq >= start)
+        const progress = parent === undefined ? '原会话当前不在本进程，无法读取实时进度；未恢复或启动原任务。'
+          : inFlight.length === 0 ? '原会话当前没有可读取的在飞进度。'
+            : renderInFlightDigest({ events: inFlight, params, siblingId: parentId })
+        child.inject(agentMessage(parentId, `用户已确认由本会话接手原会话 ${parentId}。后续用户指令转到这里；原会话继续原任务，完成后按发送方自动回注设置回传。分叉历史未改写。\n\n${progress}`, 'notice'))
+      } catch (error) { debug('takeover.notice-failed', { error: String(error) }) }
+      return { ok: true, parentId, sessionId: childId }
+    })
   }
 
   /* ------------------------------ 触发 ------------------------------ */
@@ -864,6 +942,15 @@ export function apply(ctx, config) {
       await routeToInstance(agent, message)
       return
     }
+    await refreshLineage()
+    const driverId = bindingHead(agent.id, bindingTarget)
+    if (driverId !== agent.id) {
+      const head = ctx.agents.get(driverId) ?? await reviveAgent(driverId)
+      if (head !== undefined && agent.inbox.remove(message.id) === true) {
+        try { head.followup(message) } catch (error) { agent.inbox.append('next-step', message); throw error }
+      }
+      return
+    }
     if (agent.status !== 'running') {
       debug('skip.not-running', { agent: agent.id, status: agent.status })
       return
@@ -874,22 +961,6 @@ export function apply(ctx, config) {
     if (projection === undefined || projection.openTurnStartSeq === null) {
       debug('skip.no-open-turn', { agent: agent.id, hasProjection: projection !== undefined })
       return
-    }
-
-    // **本会话已被接管 → 消息该落到 head 上**，不要再分叉。
-    // 这不是时间窗技巧，而是状态规则：一条链上只有一个 head，它才是继续对话的地方。
-    // （用时间窗合并"用户连发两条"会犯错——被合并的那条会被 steer 回仍被阻塞的
-    // worker，等于又让人等。落到 head 才是对的。）
-    const takenOverBy = recordByWorker.get(agent.id)
-    if (takenOverBy !== undefined) {
-      const head = ctx.agents.get(takenOverBy.headId)
-      if (head === undefined) {
-        debug('route.head-gone', { worker: agent.id, head: takenOverBy.headId })
-      } else if (agent.inbox.remove(message.id) === true) {
-        head.followup(message)
-        debug('route.to-head', { worker: agent.id, head: takenOverBy.headId })
-        return
-      }
     }
 
     // **手动模式**：指令照常入队（不动 inbox、不建会话），把"何时分叉"交给用户——
@@ -1218,8 +1289,15 @@ export function apply(ctx, config) {
    * @param {string} senderId 发送方会话 id（分叉源 / 后台那条）。
    * @param {string} text 消息正文。
    * @param {'notice' | 'digest' | 'reply'} marker 本插件自己的消息种类标记。
-   * @returns {any} 可直接 append / 交给 `send` 的消息。
+   * 消息通过 inbox 投递，不直接 append。
    */
+  /**
+   * 卡片标记的**权威清单**（宿主 half）。客户端 half 的 `CARD_TITLES` 必须与它一一对应：
+   * 两个 half 是各自独立的产物（客户端 bundle 跑在浏览器里、无法 import 宿主模块），
+   * 所以这条跨半边契约由**门禁 4** 静态比对（用户 2026-10：双重路径要收敛成单一信息）。
+   */
+  const CARD_MARKERS = ['notice', 'digest', 'reply', 'steer']
+
   /**
    * 给一条**跨会话**消息的正文加上发送方前缀。
    *
@@ -1229,22 +1307,7 @@ export function apply(ctx, config) {
    * `role` + `content`；官方 `dsh-subagent` 也是自己把 "Agent X sent a message: " **拼进 content**
    * （`dsh-subagent/lib/index.js:588`）。不放正文，收方的 agent 就不知道该回给谁——
    * 多成员家族里只能靠 `fork_list` 猜。
-   * @param {string} senderId 发送方会话 id。
-   * @param {string} text 正文。
-   * @param {string} what 这条消息是什么（`消息` / `中途指令`）。
-   * @returns {string} 带发送方前缀的正文。
    */
-  function senderPrefixed(senderId, text, what, note) {
-    return prefixedBody(senderId, text, what, note).text
-  }
-
-  /**
-   * 卡片标记的**权威清单**（宿主 half）。客户端 half 的 `CARD_TITLES` 必须与它一一对应：
-   * 两个 half 是各自独立的产物（客户端 bundle 跑在浏览器里、无法 import 宿主模块），
-   * 所以这条跨半边契约由**门禁 4** 静态比对（用户 2026-10：双重路径要收敛成单一信息）。
-   */
-  const CARD_MARKERS = ['notice', 'digest', 'reply', 'steer']
-
   /**
    * 正文 + **前缀长度**。长度是关键：客户端要剥掉那段前缀，但**不该重新解析语法**
    * （两个 half 各写一份"前缀长什么样"就是双重路径）。宿主是正文的产出者，由它给出偏移量，
@@ -1346,7 +1409,7 @@ export function apply(ctx, config) {
       headId,
       workerId: session.id,
       /**
-       * **家族根**（家族级判定的键：自动回注开关按它查、序号也按它计）。
+       * **家族根**（家族级判定的键：序号按它计；自动回注开关另按会话 id 查询）。
        *
        * ⚠️ 曾经记录里没有这个字段——而 `nextBranchOrdinal` 的内存那段按 `record.rootId` 过滤
        * ⇒ 那一段**一直空转**（只有血缘域那份在起作用，所以单测看不出）。判据钉在真实形状上：
@@ -1383,12 +1446,12 @@ export function apply(ctx, config) {
         sessionId: headId,
         // 标记方式**取决于模式**，两种模式的正确答案是相反的：
         //
-        // · **容器模式**（默认）：agent 是**容器名下的子会话**——用户在容器 C 里，
+        // · **容器模式**（默认关闭）：agent 是**容器名下的子会话**——用户在容器 C 里，
         //   A/B 都是 C 的 agent 实例（"一条 session 持有多条 agent 的 durable 记录"，
         //   记录就是 `subagent/catalog`），谁当 head 就把内容渲染进 C 的转写。
         //   所以这里必须 `origin:'subagent'` + `parentSession:C` + 写 catalog，
         //   并在 agent 自己的日志里放 `subagent/descriptor`（寻址与分类都要它）。
-        // · **扁平模式**（对照）：head 自己就是用户要进去的容器，于是它必须是
+        // · **扁平模式**（默认）：head 自己就是用户要进去的容器，于是它必须是
         //   **普通顶层会话**——标成子会话会让用户"钻进一个子代理"、顶层容器仍是旧会话。
         meta: {
           ...(session.header.cwd === undefined ? {} : { cwd: session.header.cwd }),
@@ -1442,6 +1505,8 @@ export function apply(ctx, config) {
         createdAt: record.createdAt,
         trigger: record.trigger,
       })
+      if (await lineage.setBinding(session.id, headId)) volatileBindings.delete(session.id)
+      else volatileBindings.set(session.id, headId)
     }
 
     // 容器模式：往**容器日志**写一条 `subagent/catalog`，把这条 agent 登记成容器的实例
@@ -1577,8 +1642,9 @@ export function apply(ctx, config) {
     // 容器模式下没有"worker 回注"这回事：容器不是 worker（它不跑 step），
     // 干活的那些 agent 才是主体，它们的产出走 `writeInstanceAnswer` 写进容器。
     if (params.containerMode === true) return
-    const record = recordByWorker.get(agent?.id)
-    if (record === undefined) return
+    const headId = bindingHead(agent?.id, bindingTarget)
+    if (headId === agent?.id) return
+    const record = { headId }
     if (!hasCompletedTurn(agent)) {
       debug('worker.idle-not-started', { worker: agent.id })
       return
@@ -2012,8 +2078,8 @@ export function apply(ctx, config) {
    * 它的 agent 就活了）。插件本来就在用 `agents` 这个服务（`create`/`get`）⇒ 不需要新依赖。
    *
    * 两点注意：① 它要拿**写租约**（`persistence.open(id, 'write')`）⇒ 同一条会话正被另一个进程
-   * 打开时会失败（如实回报，不重试、不抢）；② 恢复出来的 agent 是**寻常活会话**、由 app 拥有，
-   * 插件**不**去 dispose 它（我们只借它投一条消息）。
+   * 打开时会失败（如实回报，不重试、不抢）；② resume 返回 AgentHandle，创建归调用上下文所有；
+   * 此处仅借注册表中的 agent 投递，不主动调用 handle.dispose。
    * @param {string} sessionId 会话 id。
    * @returns {Promise<object|undefined>} 活的 agent；恢复不了时为 undefined（原因进 debug）。
    */
@@ -2051,7 +2117,7 @@ export function apply(ctx, config) {
       debug('report.disabled', { worker: worker.id })
       return
     }
-    // **自动回注的闸门**（家族级）：关掉之后旧会话跑完不再自动投给新会话——但会话照常跑、
+    // **自动回注的闸门**（会话级）：关掉之后旧会话跑完不再自动投给新会话——但会话照常跑、
     // 树照常显示、工具（`fork_send` / `fork_list`）照常用。用户 2026-10 定的语义：
     // 这不是"忘掉/删除"，只是不再自动触发后台通知。
     if (sessionMuted(worker.id)) {
@@ -2067,7 +2133,7 @@ export function apply(ctx, config) {
       maxChars: params.reInjectMaxChars,
     })
 
-    const head = ctx.agents.get(record.headId)
+    const head = ctx.agents.get(record.headId) ?? await reviveAgent(record.headId)
     if (head === undefined) {
       debug('report.no-head', { worker: worker.id, head: record.headId })
       return
@@ -2241,7 +2307,7 @@ export function apply(ctx, config) {
       },
       cancel: async (callerId, targetId, keepInbox) => {
         await refreshLineage()
-        if (!isFamilyMember(callerId, targetId)) {
+        if (callerId === targetId || !controlFamily(callerId).includes(targetId)) {
           return { ok: false, detail: `"${targetId}" 不在你的家族里；先用 fork_list 查看。` }
         }
         const target = ctx.agents.get(targetId)
@@ -2335,7 +2401,7 @@ export function apply(ctx, config) {
            * 于是标记可以做成**徽标**而不是名字的一部分（见标题不再带前缀的那处注释）。
            * 只有分叉出来的会话在表里；其它行不注入任何东西。
            */
-          marks: lineage?.marks?.() ?? {},
+          marks: { ...Object.fromEntries([...nativeEdges.keys()].filter(id => !recordByHead.has(id) && !lineage?.edgeOf(id)).map(id => [id, 0])), ...(lineage?.marks?.() ?? {}) },
           /** 标记字形（`params.titleMark`）。客户端画徽标用它，不自己硬编字形。 */
           mark: branchMark(),
           tools: exposedToolNames,
@@ -2429,7 +2495,33 @@ export function apply(ctx, config) {
       webCtx.effect(() => forkRoute, 'dsh-autofork: 手动分叉路由')
     }
 
-    // 「分叉」页签上的**自动回注开关**（契约见 `src/lineage.mjs` 的 `families` 表）。
+    const takeoverRoute = webCtx.webServer?.register?.({
+      kind: 'exact', path: TAKEOVER_PATH,
+      handler: async (req, res) => {
+        const json = (status, body) => {
+          res.statusCode = status
+          res.setHeader('content-type', 'application/json')
+          res.end(JSON.stringify(body))
+        }
+        const payload = await actionPayload(req, res, json, 'takeover')
+        if (payload === undefined) return
+        if (typeof payload?.sessionId !== 'string' || payload.sessionId === '' || payload.confirmed !== true) {
+          json(400, { ok: false, error: 'sessionId-and-confirmation-required' }); return
+        }
+        try {
+          const result = await takeOver(payload.sessionId)
+          json(result.ok ? 200 : result.status, result.ok
+            ? { ok: true, parentId: result.parentId, sessionId: result.sessionId }
+            : { ok: false, error: result.error })
+        } catch (error) {
+          debug('takeover.failed', { error: String(error) })
+          json(500, { ok: false, error: 'takeover-failed' })
+        }
+      },
+    })
+    if (takeoverRoute !== undefined) webCtx.effect(() => takeoverRoute, 'dsh-autofork: 接管路由')
+
+    // 「分叉」页签上的**自动回注开关**（契约见 `src/lineage.mjs` 的 `session_settings` 表）。
     const muteRoute = webCtx.webServer?.register?.({
       kind: 'exact',
       path: MUTE_PATH,

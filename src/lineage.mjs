@@ -66,6 +66,8 @@ export const LINEAGE_TABLE = 'edges'
  * 自己的行为。旧表不再读（它的记录留在盘上不动，见 CHANGELOG 的兼容说明）。
  */
 export const SESSION_TABLE = 'session_settings'
+export const BINDING_TABLE = 'bindings'
+export const bindingSchema = z.object({ headId: z.string().min(1), updatedAt: z.number().int().nonnegative() }).strict()
 
 /**
  * 域格式版本。改**记录形状**时必须 +1，并把旧版本列进 `compatibleVersions`
@@ -85,8 +87,8 @@ export const lineageEdgeSchema = z.object({
   workerId: z.string().min(1),
   /** 家族根（当时算出来的），便于不做上溯就归族。 */
   rootId: z.string().min(1),
-  /** 命名序号（`⑂<ordinal> <base>`）。 */
-  ordinal: z.number().int().positive(),
+  /** 徽标序号；0 表示未分配命名。 */
+  ordinal: z.number().int().nonnegative(),
   /** 命名基名（家族根当时的标题）。 */
   base: z.string(),
   /** 分配时的完整标题。 */
@@ -125,6 +127,7 @@ export const lineageDomainSpec = defineDomain({
      * "即使忘掉它，整个树也存在，只是不再自动触发后台通知"——所以这不是"忘掉/删除"）。
      */
     [SESSION_TABLE]: domainTable(sessionSettingSchema),
+    [BINDING_TABLE]: domainTable(bindingSchema),
   },
 })
 
@@ -141,11 +144,24 @@ export const lineageDomainSpec = defineDomain({
 export function createLineage(facility, debug) {
   /** headId → edge（装载 + 增量）。 */
   const edges = new Map()
+  const bindings = new Map()
   /** workerId → headId[]（按 createdAt 升序）。 */
   const headsByWorker = new Map()
 
   let domain
   let closed = false
+  const writes = new Set()
+
+  // Refresh/close must not close a domain while a put is still using it.
+  async function put(table, key, value) {
+    const pending = domain.table(table).put(key, value)
+    writes.add(pending)
+    try {
+      await pending
+    } finally {
+      writes.delete(pending)
+    }
+  }
 
   /**
    * 把一条边放进内存索引（幂等：同 key 覆盖）。
@@ -191,14 +207,37 @@ export function createLineage(facility, debug) {
     }
   })()
 
-  /** 把两张表都读进内存索引（`index()` 与 `families.set` 都是并集式：不会抹掉内存里更新的那一条）。 */
+  /** 合并持久化快照；设置只接受更新的记录，保留本地尚未落盘的更新。 */
   function indexAll() {
+    for (const [id, binding] of domain.table(BINDING_TABLE).entries()) {
+      if (!bindings.has(id) || binding.updatedAt > bindings.get(id).updatedAt) bindings.set(id, binding)
+    }
     for (const [headId, edge] of domain.table(LINEAGE_TABLE).entries()) index(headId, edge)
-    for (const [id, setting] of domain.table(SESSION_TABLE).entries()) sessionSettings.set(id, setting)
+    for (const [id, setting] of domain.table(SESSION_TABLE).entries()) {
+      const current = sessionSettings.get(id)
+      if (current === undefined || setting.updatedAt > current.updatedAt) sessionSettings.set(id, setting)
+    }
   }
 
   return {
     ready,
+    bindings() { return [...bindings].map(([id, value]) => [id, value.headId]) },
+    bindingOf(id) { return bindings.get(id)?.headId },
+    // Publish only after durable success: failed takeover cannot become an in-memory choice.
+    async setBinding(id, headId) {
+      await ready
+      if (refreshing !== undefined) await refreshing
+      if (domain === undefined || closed) return false
+      const value = { headId, updatedAt: Math.max(Date.now(), (bindings.get(id)?.updatedAt ?? -1) + 1) }
+      try {
+        await put(BINDING_TABLE, id, value)
+        bindings.set(id, value)
+        return true
+      } catch (error) {
+        debug('lineage.binding-write-failed', { session: id, error: String(error) })
+        return false
+      }
+    },
 
     /**
      * **所有分叉会话的标记表**（`{会话 id: 序号}`）——给客户端的侧栏徽标用。
@@ -231,14 +270,19 @@ export function createLineage(facility, debug) {
      * @returns {Promise<boolean>} 是否已持久化。
      */
     async setSessionSetting(sessionId, setting) {
-      const record = { muted: setting.muted === true, updatedAt: Date.now() }
+      const record = {
+        muted: setting.muted === true,
+        updatedAt: Math.max(Date.now(), (sessionSettings.get(sessionId)?.updatedAt ?? -1) + 1),
+      }
       sessionSettings.set(sessionId, record)
+      await ready
+      if (refreshing !== undefined) await refreshing
       if (domain === undefined || closed) {
         debug('lineage.setting-memory-only', { session: sessionId })
         return false
       }
       try {
-        await domain.table(SESSION_TABLE).put(sessionId, record)
+        await put(SESSION_TABLE, sessionId, record)
         debug('lineage.setting-wrote', { session: sessionId, muted: record.muted })
         return true
       } catch (error) {
@@ -260,11 +304,15 @@ export function createLineage(facility, debug) {
      * @returns {Promise<boolean>} 是否重读成功（失败只降级，绝不影响分叉本体）。
      */
     async refresh() {
-      if (facility === undefined || domain === undefined) return false
+      await ready
+      if (closed || facility === undefined || domain === undefined) return false
       if (refreshing !== undefined) return refreshing
       refreshing = (async () => {
         try {
-          await domain?.close?.()
+          await Promise.allSettled([...writes])
+          if (closed) return false
+          await domain.close()
+          if (closed) return false
           domain = await facility.open(lineageDomainSpec)
           indexAll()
           debug('lineage.refreshed', {
@@ -305,12 +353,14 @@ export function createLineage(facility, debug) {
      */
     async remember(headId, edge) {
       index(headId, edge)
+      await ready
+      if (refreshing !== undefined) await refreshing
       if (domain === undefined || closed) {
         debug('lineage.memory-only', { head: headId })
         return false
       }
       try {
-        await domain.table(LINEAGE_TABLE).put(headId, edge)
+        await put(LINEAGE_TABLE, headId, edge)
         debug('lineage.wrote', { head: headId, worker: edge.workerId, ordinal: edge.ordinal })
         return true
       } catch (error) {
@@ -319,11 +369,6 @@ export function createLineage(facility, debug) {
       }
     },
 
-    /**
-     * 该基名已经用掉的**最大**序号。
-     * @param {string} base 命名基名。
-     * @returns {number} 最大序号（没有则 0）。
-     */
     /**
      * 某个**家族**已经用过的最大序号。
      *
@@ -353,6 +398,9 @@ export function createLineage(facility, debug) {
      */
     async close() {
       closed = true
+      await ready
+      if (refreshing !== undefined) await refreshing
+      await Promise.allSettled([...writes])
       if (domain === undefined) return
       try {
         await domain.close()

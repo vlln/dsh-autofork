@@ -3,6 +3,7 @@
   "version": "0.11.0",
   "description": "DSH 插件：agent 忙时自动分叉会话 —— 你新发的指令立刻在新会话里得到响应，旧会话留在后台跑完并把结果回注。官方 bundle 插件，装：dsh plugin --profile web add github:vlln/dsh-autofork",
   "license": "MIT",
+  "icon": "icon.svg",
   "type": "module",
   "main": "index.mjs",
   "exports": {
@@ -16,6 +17,7 @@
   },
   "files": [
     "index.mjs",
+    "icon.svg",
     "client",
     "src",
     "cordis.patch.yml",
@@ -25,7 +27,7 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "gate": "node scripts/gate.mjs",
-    "check": "node --check index.mjs && node --check src/digest.mjs && node --check src/params.mjs && node --check src/tools.mjs && node --check src/lineage.mjs && node --check client/index.js",
+    "check": "node --check index.mjs && node --check src/digest.mjs && node --check src/params.mjs && node --check src/tools.mjs && node --check src/lineage.mjs && node --check src/refresh.mjs && node --check src/relationships.mjs && node --check client/index.js",
     "check:e2e": "node --check tests/e2e/drive.mjs && node --check tests/e2e/mock-server.mjs && node --check tests/e2e/verify-lineage.mjs && node --check tests/e2e/session-dir.mjs && node --check tests/e2e/steer-block-live.mjs",
     "check:dev": "node --check tests/react-stub.mjs && node --check scripts/preview-tab.mjs",
     "preview:tab": "node scripts/preview-tab.mjs",

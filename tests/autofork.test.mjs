@@ -45,7 +45,7 @@ function sessionLog() {
 /**
  * 以**链式接管模式**（对照臂）apply 插件。
  *
- * 容器模式已成为默认（`containerMode: true`），而本文件里绝大多数用例描述的是链式模式的
+ * 容器模式默认关闭（`containerMode: false`），而本文件里绝大多数用例描述的是链式模式的
  * 行为（容器自己跑、忙时才分叉、产出以注入行回灌）。显式钉住对照臂，避免默认值一变
  * 就让整个文件测到别的东西——那是最难查的一类"测试还绿着但测的是别的"。
  * @param {any} ctx 桩上下文。
@@ -113,6 +113,7 @@ function safeMessages() {
  * @returns {any} 桩上下文与调用记录。
  */
 function harness(options = {}) {
+  const bindings = options.bindings ?? {}
   const events = options.events ?? sessionLog()
   const projection = options.projection ?? PROJECTION
   const listeners = new Map()
@@ -247,7 +248,7 @@ function harness(options = {}) {
         const childEvents = []
         const childSession = {
           id: opts.sessionId,
-          header: { id: opts.sessionId, createdAt: 1_700_000_000_000, cwd: opts.meta?.cwd },
+          header: { id: opts.sessionId, createdAt: 1_700_000_000_000, ...opts.meta },
           append: (type, data, appendOptions) => {
             if (options.childAppendThrows === type) throw new Error('stub: append refused')
             childEvents.push({ seq: childEvents.length, type, data, ...(appendOptions ?? {}) })
@@ -321,6 +322,7 @@ function harness(options = {}) {
       },
       rename: (session, title) => { calls.renames.push({ sessionId: session?.id, title }) },
     },
+    sessionPersistence: { list: async () => (options.nativeHeaders ?? []).map(header => ({ header, revision: 'test' })) },
     sessions: {
       get: (id) => (id === 'session-parent' ? parentSession : createdAgents.get(id)?.session),
       /** 活会话（本桩造的）。 */
@@ -341,7 +343,14 @@ function harness(options = {}) {
         // 两张表混在一起会让 `settingsOf()` 读到一条"边"（形状不对但静默通过）。
         const settingRows = new Map(Object.entries(options.lineageSettings ?? {}))
         return {
-          table: (table) => (table === 'session_settings'
+          table: (table) => (table === 'bindings' ? {
+            entries: () => Object.entries(bindings),
+            put: async (key, value) => {
+              if (options.bindingFailure) throw new Error('write failed')
+              if (options.bindingGate) await options.bindingGate
+              bindings[key] = value
+            },
+          } : table === 'session_settings'
             ? {
               entries: () => [...settingRows.entries()][Symbol.iterator](),
               put: async (key, value) => {
@@ -467,7 +476,7 @@ test('可选能力全部走嵌套 ctx.inject，且缺席时不抛', () => {
   applyChain(ctx, undefined)
   const nested = calls.nestedInject.flat().sort()
   assert.deepEqual(nested,
-    ['agentDefaultModel', 'agentPresets', 'sessionTitle', 'sessions', 'storageDomain',
+    ['agentDefaultModel', 'agentPresets', 'sessionPersistence', 'sessionTitle', 'sessions', 'sessions', 'storageDomain',
       'tools', 'webServer', 'workspaceRegistry'],
     '每一项都是"缺席时功能降级、但插件照常工作"的能力')
 })
@@ -2608,12 +2617,8 @@ test('fork_send 对**不在本进程**的家族成员：先恢复再投递（不
 })
 
 test('fork_send 恢复失败（会话正被别的进程打开）：如实回报，且**不假装已投递**', async () => {
-  const stub = await forkedFamily()
-  const { calls, tool, head } = stub
-  stub.createdAgents.delete('session-parent')
   // 写租约被占：`resume` 会抛（真实世界是 session/writer-held）
   const failing = harness({
-    events: stub.events,
     resumeFails: true,
   })
   applyChain(failing.ctx, { forkSendBlockTimeoutMs: 5000 })
@@ -2630,7 +2635,7 @@ test('fork_send 恢复失败（会话正被别的进程打开）：如实回报�
   assert.equal(result.ok, false, '恢复不了就必须如实失败')
   assert.match(result.detail, /无法恢复/, '把可能的原因说清（正被另一个进程打开）')
   assert.equal(failing.calls.steers.length, 0, '失败时不得有任何投递')
-  assert.equal(calls.agentsResume.length, 0, '（上一个桩没被用到）')
+  assert.deepEqual(failing.calls.agentsResume, [{ resumeSessionId: 'session-parent' }], '确实尝试恢复目标，失败不是提前拒绝')
 })
 
 test('宿主没有 agents.resume：降级成"无法恢复"，不假装成功', async () => {
@@ -2649,4 +2654,177 @@ test('宿主没有 agents.resume：降级成"无法恢复"，不假装成功', a
   assert.equal(result.ok, false)
   assert.match(result.detail, /无法恢复/)
   assert.equal(stub.calls.steers.length, 0, '没有投递就别报成功')
+})
+
+
+async function takeoverRequest(h, sessionId, confirmed = true, headers = { 'x-dsh-autofork': '1' }) {
+  const route = h.calls.routes.find(row => row.path === '/api/dsh-autofork/takeover')
+  let body
+  const res = { statusCode: 0, setHeader() {}, end(text) { body = JSON.parse(text) } }
+  const req = { method: 'POST', headers, async *[Symbol.asyncIterator]() { yield JSON.stringify({ sessionId, confirmed }) } }
+  await route.handler(req, res)
+  return { status: res.statusCode, ...body }
+}
+const nativeHeader = (id, parentSession = 'session-parent') => ({ id, parentSession, createdAt: 10 })
+async function nativeHarness(options = {}) {
+  const h = harness({ nativeHeaders: [nativeHeader('native-b'), nativeHeader('native-c'), { ...nativeHeader('subagent'), origin: 'subagent' }], ...options })
+  for (const id of ['native-b', 'native-c']) await h.ctx.agents.create({ sessionId: id, meta: { parentSession: 'session-parent' } })
+  h.calls.agentsCreate.length = 0
+  applyChain(h.ctx, { forkMode: 'manual', ...options.config })
+  await flush()
+  return h
+}
+
+test('native 默认仅展示：不改名、不接管、不回注，subagent 不入图', async () => {
+  const h = await nativeHarness()
+  const health = await callHealth(h.calls.routes, 'sessionId=session-parent')
+  assert.equal(health.driver.sessionId, 'session-parent')
+  assert.deepEqual(health.nodes.map(n => n.sessionId), ['session-parent', 'native-b', 'native-c'])
+  const child = health.nodes[1]
+  assert.equal(child.kind, 'fork'); assert.equal(child.ordinal, 0)
+  assert.equal(child.canTakeover, true); assert.equal(child.takeoverActive, false)
+  assert.equal(health.marks['native-b'], 0)
+  assert.equal(h.calls.renames.length, 0)
+  for (const fn of h.listeners.get('agent/status')) fn({ agent: h.parent, status: 'idle' })
+  await flush()
+  assert.equal(h.calls.followups.length, 0)
+})
+
+test('native 确认守卫、接管与替换：旧任务不中止、发送方 muted 保持、历史不改写', async () => {
+  const bindings = {}
+  const h = await nativeHarness({ bindings, lineageSettings: { 'session-parent': { muted: true, updatedAt: 1 } } })
+  assert.equal((await takeoverRequest(h, 'native-b', false)).status, 400)
+  assert.equal((await takeoverRequest(h, 'native-b', true, {})).status, 403)
+  assert.deepEqual(bindings, {})
+  assert.equal((await takeoverRequest(h, 'subagent')).status, 409)
+  assert.equal((await takeoverRequest(h, 'native-b')).ok, true)
+  h.parent.status = 'idle'
+  h.emitInsert(userMessage('after-confirm'))
+  await flush()
+  assert.equal(h.calls.followups.at(-1).agent, 'native-b')
+  assert.equal(h.calls.cancels.length, 0)
+  assert.equal(h.calls.appended.length, 0)
+  assert.equal(h.calls.lineageSettingWrites.length, 0)
+  const health = await callHealth(h.calls.routes, 'sessionId=session-parent')
+  assert.equal(health.driver.sessionId, 'native-b')
+  assert.equal(health.nodes.find(n => n.sessionId === 'native-b').takeoverActive, true)
+  assert.equal(health.nodes[0].muted, true)
+  assert.equal((await takeoverRequest(h, 'native-c')).ok, true)
+  assert.equal(bindings['session-parent'].headId, 'native-c')
+  assert.equal((await callHealth(h.calls.routes, 'sessionId=session-parent')).driver.sessionId, 'native-c')
+})
+
+test('native binding 重启恢复选择，不按最新后代推断', async () => {
+  const bindings = {}
+  const first = await nativeHarness({ bindings })
+  await takeoverRequest(first, 'native-b')
+  const second = await nativeHarness({ bindings })
+  assert.equal((await callHealth(second.calls.routes, 'sessionId=session-parent')).driver.sessionId, 'native-b')
+  second.parent.status = 'idle'
+  second.emitInsert(userMessage('restart'))
+  await flush()
+  assert.equal(second.calls.followups.at(-1).agent, 'native-b')
+})
+
+test('native binding 写失败不留选择或通知，目标恢复失败不写 binding', async () => {
+  const bindings = {}
+  const h = await nativeHarness({ bindings, bindingFailure: true })
+  assert.equal((await takeoverRequest(h, 'native-b')).status, 503)
+  assert.deepEqual(bindings, {})
+  assert.equal(h.calls.injections.length, 0)
+  assert.equal((await callHealth(h.calls.routes, 'sessionId=session-parent')).driver.self, true)
+  h.createdAgents.delete('native-b')
+  h.ctx.agents.resume = async () => { throw new Error('lease held') }
+  assert.equal((await takeoverRequest(h, 'native-b')).status, 409)
+  assert.deepEqual(bindings, {})
+})
+
+test('native 同父并发单目标：竞争请求409，不留下部分选择', async () => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const bindings = {}
+  const h = await nativeHarness({ bindings, bindingGate: gate })
+  const first = takeoverRequest(h, 'native-b')
+  await flush()
+  const second = await takeoverRequest(h, 'native-c')
+  assert.equal(second.status, 409)
+  assert.deepEqual(bindings, {})
+  release()
+  assert.equal((await first).ok, true)
+  assert.equal(bindings['session-parent'].headId, 'native-b')
+})
+
+test('native 拒绝已有下游的目标及循环 header', async () => {
+  const h = await nativeHarness({ bindings: { 'native-b': { headId: 'native-c', updatedAt: 1 } } })
+  assert.equal((await takeoverRequest(h, 'native-b')).error, 'child-already-taken-over')
+  const cyclic = await nativeHarness({ nativeHeaders: [nativeHeader('native-b'), nativeHeader('session-parent', 'native-b')] })
+  cyclic.parent.session.header.parentSession = 'native-b'
+  assert.equal((await takeoverRequest(cyclic, 'native-b')).error, 'binding-cycle')
+})
+
+
+test('native 显式send可用但cancel权限不扩大；选中binding后仅选中网络可cancel', async () => {
+  const h = await nativeHarness()
+  const send = h.calls.registeredTools.find(t => t.name === 'fork_send')
+  const cancel = h.calls.registeredTools.find(t => t.name === 'fork_cancel')
+  const exec = { agent: { id: 'session-parent' } }
+  assert.equal((await send.execute({ sessionId: 'native-b', text: 'hello' }, exec)).ok, true)
+  assert.equal((await cancel.execute({ sessionId: 'native-b' }, exec)).ok, false)
+  await takeoverRequest(h, 'native-b')
+  assert.equal((await cancel.execute({ sessionId: 'native-b' }, exec)).ok, true)
+  assert.equal((await cancel.execute({ sessionId: 'native-c' }, exec)).ok, false)
+})
+
+test('native 普通关系不计入autofork后台上限', async () => {
+  const h = await nativeHarness({ config: { forkMode: 'auto', maxActiveBranches: 1 } })
+  h.emitInsert(userMessage())
+  await flush()
+  assert.equal(h.calls.agentsCreate.length, 1)
+})
+
+test('native 自动回传遵守binding并保留发送方muted', async () => {
+  const h = await nativeHarness({ events: sessionLog().slice(0, 8) })
+  h.createdAgents.get('native-b').status = 'idle'
+  await takeoverRequest(h, 'native-b')
+  for (const fn of h.listeners.get('agent/status')) fn({ agent: h.parent, status: 'idle' })
+  await flush()
+  assert.equal(h.calls.followups.at(-1).agent, 'native-b')
+  const muted = await nativeHarness({ events: sessionLog().slice(0, 8), lineageSettings: { 'session-parent': { muted: true, updatedAt: 1 } } })
+  await takeoverRequest(muted, 'native-b')
+  for (const fn of muted.listeners.get('agent/status')) fn({ agent: muted.parent, status: 'idle' })
+  await flush()
+  assert.equal(muted.calls.followups.length, 0)
+})
+
+
+test('native 接管通知补live在飞摘要；非live父不恢复；通知失败仍保留已提交选择', async () => {
+  const live = await nativeHarness()
+  await takeoverRequest(live, 'native-b')
+  assert.match(live.calls.injections[0].message.content[0].text, /npm test/)
+  assert.equal(live.calls.followups.length, 0)
+  const offline = await nativeHarness()
+  offline.createdAgents.delete('session-parent')
+  await takeoverRequest(offline, 'native-b')
+  assert.match(offline.calls.injections[0].message.content[0].text, /未恢复或启动原任务/)
+  assert.equal(offline.calls.agentsResume.length, 0)
+  const bindings = {}
+  const failing = await nativeHarness({ bindings })
+  failing.createdAgents.get('native-b').inject = () => { throw new Error('notification failed') }
+  assert.equal((await takeoverRequest(failing, 'native-b')).ok, true)
+  assert.equal(bindings['session-parent'].headId, 'native-b')
+})
+
+test('autofork binding写失败：新运行时选择不被旧持久化选择遮盖', async () => {
+  const h = harness({ bindingFailure: true, bindings: { 'session-parent': { headId: 'old-head', updatedAt: 1 } } })
+  applyChain(h.ctx, { forkMode: 'manual' })
+  // Exercise explicit fork route, which can replace a stale unavailable driver.
+  h.parent.inbox.nextTurn.push(userMessage())
+  const route = h.calls.routes.find(r => r.path === '/api/dsh-autofork/fork')
+  let body
+  await route.handler({ method: 'POST', headers: { 'x-dsh-autofork': '1' }, async *[Symbol.asyncIterator]() {
+    yield JSON.stringify({ sessionId: 'session-parent', messageId: 'm-user' })
+  } }, { setHeader() {}, end(text) { body = JSON.parse(text) } })
+  assert.equal(body.ok, true)
+  const health = await callHealth(h.calls.routes, 'sessionId=session-parent')
+  assert.equal(health.driver.sessionId, body.sessionId)
 })

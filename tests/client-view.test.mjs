@@ -8,7 +8,7 @@
  * 而这一层恰恰是最容易悄悄坏的地方（字段名写错、`undefined` 渲染进正文、状态标签退化成
  * 两个含义并排）。
  *
- * 这里**不引入任何依赖**（仓库不声明依赖、也不构建）：React 用一个 ~40 行的桩顶上，
+ * 这里**不引入任何依赖**（仓库不声明依赖、也不构建）：React 用有限的桩顶上，
  * 只实现本 bundle 用到的那三样（`createElement` / `useState` / `useEffect`）。于是
  * `npm test` 就能验证：给定服务端的 `nodes`，页签渲染出的文案里有没有那些**对用户有意义
  * 的信息**（触发指令、相对时间、状态、我在哪），以及**旧数据**（没有 trigger 的边）会不会
@@ -16,7 +16,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mountView } from './react-stub.mjs'
+import { mountView, mountBundle, makeDomElement } from './react-stub.mjs'
 
 /** 造一条服务端形状的节点（字段与服务端 `familyNodes()` 对齐）。 */
 function node(overrides) {
@@ -97,7 +97,7 @@ test('页签渲染：触发指令、相对时间、状态、我在哪——都�
     assert.match(text, /运行中/)
     assert.match(text, /空闲/)
     assert.match(text, /你在这里/)
-    // 已结束的行**不再**挂状态胶囊（整行已变淡，再挂一枚同样的胶囊是纯重复）；
+    // 已结束的行**不再**挂状态胶囊（不在本进程不是用户需要的实时状态）；
     // 完整会话 id 也从行里删掉了（它只留在 tooltip 上）
     assert.ok(!text.includes('未运行'), '未运行不再重复成胶囊：\n' + text)
     assert.ok(!text.includes('000001') && !text.includes('000002'),
@@ -172,22 +172,67 @@ test('页签渲染：旧边（没有 trigger / at）只显示会话坐标，不�
   }
 })
 
-test('页签渲染：只有自己一条会话时只报"还没有分叉"，不复述插件怎么工作', async () => {
-  const view = await mountView({ current: 'session-root-000001', nodes: [node({})] })
-  const text = view.texts.join('\n')
+test('页签显隐：会话没有分叉时不注册「分叉」页签', async () => {
+  // 用户 2026-10："当 session 没有 fork 时，应该隐藏「分叉」页签。"
+  // 判据钉在**槽注册表**上（而不是"渲染出来好不好看"）：没有家族就没有这一条 list 条目，
+  // 官方也就造不出这个 tab 按钮。
+  const own = node({ sessionId: 'session-root-000001' })
+  const forked = node({
+    sessionId: 'session-head-000002', label: '修 GUI 卡顿', ordinal: 1,
+    depth: 1, parentId: 'session-root-000001', current: false,
+  })
+
+  const lonely = await mountBundle({ current: 'session-root-000001', nodes: [own] })
   try {
-    assert.match(text, /还没有分叉/, '摘要行要说明还没有分叉')
-    // 空态**只**报状态，不解释"它忙时你再发一条指令会怎样"（用户 2026-10：那是噪声，已删）。
-    // 判据同 0.6.2 的卡片正文原则：界面文字要么是模型可见内容、要么是数据派生的标签。
-    for (const noise of ['它正忙', '自动分叉出新会话', '结果回注']) {
-      assert.ok(!text.includes(noise), `空态不得出现解释性文案「${noise}」：\n` + text)
+    assert.equal(lonely.registry.has('conversation.view'), false,
+      '只有自己一条会话（没有分叉）时不得出现「分叉」页签')
+  } finally { lonely.stop() }
+
+  // "当前会话还没解析出来"的空白态（`nodes` 为空）同样不该冒出页签。
+  const blank = await mountBundle({ nodes: [own, forked] })
+  try {
+    assert.equal(blank.registry.has('conversation.view'), false, '没有当前会话时不出现页签')
+  } finally { blank.stop() }
+})
+
+test('页签显隐：分叉出现 / 消失时，页签跟着注册与注销', async () => {
+  const own = node({ sessionId: 'session-root-000001' })
+  const forked = node({
+    sessionId: 'session-head-000002', label: '修 GUI 卡顿', ordinal: 1,
+    depth: 1, parentId: 'session-root-000001', current: false,
+  })
+  // `options.nodes` 是 fetch 桩每次现读的那个数组 ⇒ 换引用即可模拟"下一次轮询带回新家族"。
+  const options = { current: 'session-root-000001', nodes: [own] }
+  const bundle = await mountBundle(options)
+  try {
+    assert.equal(bundle.registry.has('conversation.view'), false, '起始：没有分叉')
+
+    options.nodes = [own, forked]
+    await bundle.tick()
+    assert.ok(bundle.registry.has('conversation.view'), '分叉一出现，页签就该出现')
+    const text = bundle.stub.texts(bundle.renderSlot('conversation.view')).join('\n')
+    assert.match(text, /2 条会话/, '页签内容是本会话所在家族')
+    // 界面文字要么是模型可见内容、要么是数据派生的标签（见 0.6.2 的卡片正文原则）：
+    // 这里只留"几条会话 / 几条在跑"这种派生标签，不复述插件怎么工作、不写动作提示。
+    for (const noise of ['它正忙', '自动分叉出新会话', '结果回注', '点击任意一行']) {
+      assert.ok(!text.includes(noise), `页签不得出现解释性文案「${noise}」：\n` + text)
     }
-    assert.ok(!text.includes('⑂1 <本会话名>'),
-      '空态压缩成一句，不再复述命名规则（那里已经有一行示例行）')
     assert.ok(!/undefined|null|NaN/.test(text), '渲染文案里不能漏出 undefined：\n' + text)
-  } finally {
-    view.stop()
-  }
+    // "还没有分叉"那句随页签显隐一起去掉：页签存在时这句话不成立，只在切换会话的那一帧
+    // 里会说一句与当前会话不符的话（见 BranchView 的注释）。
+    assert.ok(!text.includes('还没有分叉'), '有分叉时不得再报"还没有分叉"')
+
+    options.nodes = [own]
+    await bundle.tick()
+    assert.equal(bundle.registry.has('conversation.view'), false,
+      '家族回到只有自己一条时，页签要注销（不是留着空壳）')
+
+    // 再分叉一次：注册要能重来（注销是幂等的，不能把下一次注册也弄坏）。
+    options.nodes = [own, forked]
+    await bundle.tick()
+    assert.ok(bundle.registry.has('conversation.view'), '注销后再次分叉仍要出现页签')
+  } finally { bundle.stop() }
+  assert.equal(bundle.registry.has('conversation.view'), false, '插件卸载后不留注册')
 })
 
 /** 从元素树里按标签名收集元素（`svg` / `path` / `div`…）。 */
@@ -254,7 +299,7 @@ test('页签渲染：树状图 —— 连线数、父子几何、卡片不重叠
   assert.ok(cw > 0 && ch > 0, '卡片必须有显式尺寸（布局与连线的锚点）')
   assert.equal(x('session-root'), (x('session-a') + x('session-b')) / 2, '父节点居中于孩子')
   for (const path of paths) {
-    const to = path.props.key
+    const to = path.key
     const [x1, y1, , , , , x2, y2] = pathNumbers(path.props.d)
     const parent = to === 'session-c' ? 'session-a' : 'session-root'
     assert.equal(x1, x(parent) + cw / 2, '连线从父卡底边中点出发')
@@ -274,8 +319,8 @@ test('页签渲染：树状图 —— 连线数、父子几何、卡片不重叠
   }
 
   // ⑤ 在跑的那条用强调色连线（状态映射到图上，不是随机配色）。
-  const running = paths.find(path => path.props.key === 'session-a')
-  const finished = paths.find(path => path.props.key === 'session-c')
+  const running = paths.find(path => path.key === 'session-a')
+  const finished = paths.find(path => path.key === 'session-c')
   assert.match(String(running.props.stroke), /state-business-primary/, '运行中的那条连线用强调色')
   assert.match(String(finished.props.stroke), /border-l2/, '未运行的那条用中性色')
 
@@ -347,56 +392,67 @@ test('侧栏行的「分叉标记」是**徽标**，不是名字字符串的一�
   // 官方没有常驻徽标插槽（`sidebar.workspaces.session.row.action` 是**悬停**动作区）⇒ 自造缝：
   // 按 `[data-row-key="session:<id>"]` 找行，在**标题之前**插一枚 `⑂n`。
   const MARK = '\u2442'
-  /** 造一行（官方结构：slot / title / time / rowActions）。 */
   const makeRow = (key, titleText) => {
-    const inserted = []
-    const row = {
-      getAttribute: name => (name === 'data-row-key' ? key : null),
-      children: [{ textContent: '' }, { textContent: titleText }, { textContent: '2d' }, { textContent: '' }],
-      // **像真 DOM 一样真的插进 children**：否则测不出"下一次同步把自己徽标当标题"那个坑。
-      insertBefore(node, before) {
-        const at = before === null || before === undefined ? this.children.length : this.children.indexOf(before)
-        this.children.splice(at < 0 ? this.children.length : at, 0, node)
-        inserted.push(node)
-      },
-      querySelector: selector => (selector === '[data-autofork-mark]'
-        ? inserted.find(node => node.attributes['data-autofork-mark'] !== undefined) ?? null
-        : null),
-      inserted,
+    const row = makeDomElement()
+    row.setAttribute('data-row-key', key)
+    for (const text of ['', titleText, '2d', '']) {
+      const child = makeDomElement('span')
+      child.textContent = text
+      row.appendChild(child)
     }
     return row
   }
+  const badgeOf = row => row.querySelector('[data-autofork-mark]')
   const marked = makeRow('session:session-head-1', '修 GUI 卡顿')
   const legacy = makeRow('session:session-old-2', `${MARK}1 Sleep 1min`)   // 旧标题自带标记
   const plain = makeRow('session:session-plain-3', '普通会话')
   const workspace = makeRow('workspace:533e73a4', 'Default workspace')
 
-  const view = await mountView({
-    current: 'session-someone',
-    nodes: [],
-    marks: { 'session-head-1': 3, 'session-old-2': 1 },
-    mark: MARK,
+  const options = {
+    current: 'session-someone', nodes: [],
+    marks: { 'session-head-1': 3, 'session-old-2': 1 }, mark: MARK,
     sessionRowNodes: [marked, legacy, plain, workspace],
-  })
-
-  assert.equal(marked.inserted.length, 1, '被标记的行要插一枚徽标')
-  assert.equal(marked.inserted[0].textContent, `${MARK}3`, '徽标内容 = 标记 + 序号')
-  assert.equal(legacy.inserted.length, 0, '标题里已经带标记的行**不**再插徽标（否则读成 `⑂1 ⑂1 名字`）')
-  assert.equal(plain.inserted.length, 0, '没被标记的会话不插任何东西')
-  assert.equal(workspace.inserted.length, 0, '工作区行不插（只认 `session:` 前缀）')
-  view.stop()
-
-  // **回归**：徽标插在标题之前 ⇒ 下一次同步时它在 `children[1]`，标题顺延到 `children[2]`。
-  // 不区分这一步就会把**自己的徽标**当标题读（以为"标题已带标记"）⇒ 删掉徽标 ⇒ 插/删来回抖。
-  const again = await mountView({
-    current: 'session-someone',
-    nodes: [],
-    marks: { 'session-head-1': 3, 'session-old-2': 1 },
-    mark: MARK,
-    sessionRowNodes: [marked, legacy, plain, workspace],
-  })
-  assert.equal(marked.inserted.length, 1, '第二次同步不能把徽标删掉（幂等）')
-  again.stop()
+  }
+  // 走 `mountBundle`：这条测试判的是**侧栏徽标**，与「分叉」页签的显隐无关，
+  // 所以家族为空（页签不注册）也不影响它。
+  const view = await mountBundle(options)
+  try {
+    const badge = badgeOf(marked)
+    assert.ok(badge)
+    assert.equal(badge.textContent, `${MARK}3`)
+    assert.equal(badgeOf(legacy), null, '旧标题自带标记，不重复')
+    assert.equal(badgeOf(plain), null)
+    assert.equal(badgeOf(workspace), null)
+    await view.tick()
+    await view.tick()
+    assert.equal(badgeOf(marked), badge, '同一实例多次同步保留原节点')
+    assert.equal(marked.children.length, 5)
+    options.marks['session-head-1'] = 4
+    await view.tick()
+    assert.equal(badge.textContent, `${MARK}4`, '序号变化原地更新')
+    options.mark = ''
+    await view.tick()
+    assert.equal(badgeOf(marked), null, '禁用标记清理已有徽标')
+    assert.equal(badge.parentNode, null)
+    options.mark = MARK
+    await view.tick()
+    assert.ok(badgeOf(marked), '恢复配置重新插入')
+    delete options.marks['session-head-1']
+    await view.tick()
+    assert.equal(badgeOf(marked), null, '移除标记记录清理徽标')
+    options.marks['session-head-1'] = 4
+    await view.tick()
+    assert.ok(badgeOf(marked))
+    marked.setAttribute('data-row-key', 'workspace:recycled')
+    await view.tick()
+    assert.equal(badgeOf(marked), null, '虚拟行被复用为工作区时移除旧徽标')
+    marked.setAttribute('data-row-key', 'session:session-head-1')
+    await view.tick()
+    assert.ok(badgeOf(marked))
+  } finally { view.stop() }
+  assert.equal(badgeOf(marked), null, '卸载清理插件徽标')
+  assert.equal(marked.children.length, 4, '宿主结构保持原样')
+  assert.equal(marked.children[1].textContent, '修 GUI 卡顿')
 })
 
 test('每张卡自带「自动回注」开关：按会话渲染、点一下按同形契约落盘（且不误触切会话）', async () => {
@@ -426,8 +482,8 @@ test('每张卡自带「自动回注」开关：按会话渲染、点一下按�
   assert.equal(switches.length, 2, '每张卡各一个开关')
   const onSwitch = switches.find(item => item.props['data-mute-toggle'] === 'session-root-000001')
   const offSwitch = switches.find(item => item.props['data-mute-toggle'] === 'session-root-000002')
-  assert.equal(onSwitch.props['aria-checked'], 'false', '开着的会话 aria-checked=false（未静音）')
-  assert.equal(offSwitch.props['aria-checked'], 'true', '关掉的会话 aria-checked=true')
+  assert.equal(onSwitch.props['aria-checked'], 'true', '自动回注开启时 checked=true')
+  assert.equal(offSwitch.props['aria-checked'], 'false', '自动回注关闭时 checked=false')
   // 形态：**迷你开关**（轨道+圆钮），不是文字药丸 —— 原先那枚「回注开」药丸与状态胶囊、
   // 「你在这里」挤在同一行，一排三个 pill（用户 2026-10："太丑了"）。
   assert.equal(view.texts.some(t => /回注/.test(String(t))), false, '卡上不该再有「回注开/关」文字')
@@ -449,8 +505,6 @@ test('每张卡自带「自动回注」开关：按会话渲染、点一下按�
 
   // 点开关：必须 stopPropagation（否则会顺带触发卡片的"切会话"）
   let stopped = false
-  let navigated = null
-  view.bundle?.opened
   onSwitch.props.onClick({ stopPropagation: () => { stopped = true } })
   assert.equal(stopped, true, '点开关要阻止冒泡')
   const post = view.fetchCalls.find(call => String(call.url).includes('/api/dsh-autofork/mute'))
@@ -459,5 +513,104 @@ test('每张卡自带「自动回注」开关：按会话渲染、点一下按�
   assert.equal(post.init.headers['x-dsh-autofork'], '1', '与分叉路由同一道安全边界')
   assert.deepEqual(JSON.parse(post.init.body), { sessionId: 'session-root-000001', muted: true },
     '改的是**这张卡**那条会话，不是当前会话/家族')
+  for (const key of ['Enter', ' ']) {
+    let prevented = false
+    stopped = false
+    offSwitch.props.onKeyDown({ key, preventDefault() { prevented = true }, stopPropagation() { stopped = true } })
+    assert.equal(prevented, true)
+    assert.equal(stopped, true)
+    const last = view.fetchCalls.filter(call => call.url.includes('/mute')).at(-1)
+    assert.deepEqual(JSON.parse(last.init.body), { sessionId: 'session-root-000002', muted: false })
+  }
+  const count = view.fetchCalls.length
+  offSwitch.props.onKeyDown({ key: 'Escape' })
+  assert.equal(view.fetchCalls.length, count, '其他键不触发请求')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(view.opened, [], '开关操作不发起导航')
   view.stop()
+})
+
+
+test('自定义 hover 面板只展示实时状态，循环父链也能完成渲染', async () => {
+  // 家族里得有分叉，页签才会注册；渲染时再用显式初态喂进要测的那份节点。
+  const bundle = await mountBundle({
+    current: 'session-a',
+    nodes: [node({ sessionId: 'session-a' }), node({ sessionId: 'session-b', current: false })],
+    queueRowNodes: [],
+  })
+  try {
+    window.innerWidth = 1440
+    window.innerHeight = 900
+    const entry = bundle.registry.get('conversation.view')
+    for (const state of ['finished', 'running', 'idle']) {
+      const nodes = [
+        node({ sessionId: 'session-a', label: '甲', parentId: 'session-b', state }),
+        node({ sessionId: 'session-b', label: '乙', parentId: 'session-a', current: false }),
+      ]
+      // 显式提供 hover 初态，验证真正的 portal 面板而非 aria-label；不声称模拟鼠标或重渲染。
+      const tree = bundle.stub.render({ type: entry.component, props: {} }, { states: [
+        { current: 'session-a', nodes, driver: null }, 0,
+        { id: 'session-a', rect: { left: 100, right: 316, top: 100 } },
+      ] })
+      const panels = collect(tree, 'div').filter(item => item.props['data-dsh-autofork-hover'] !== undefined)
+      assert.equal(panels.length, 1, 'react-dom 分支必须实际产出详情面板')
+      const text = bundle.stub.texts(panels[0]).join('\n')
+      assert.match(text, /session-a/, '面板确实展示被悬停节点的详情')
+      if (state === 'finished') assert.doesNotMatch(text, /finished|未运行|运行中|空闲/)
+      else assert.ok(text.includes(state === 'running' ? '运行中' : '空闲'))
+      assert.equal(bundle.stub.rows(tree).length, 2, '循环父链不会阻断两张卡的渲染')
+    }
+  } finally { bundle.stop() }
+})
+
+
+test('官方 fork 徽标无编号、仅 eligible 官方卡给动作，active 是数据状态', async () => {
+  const bundle = await mountBundle({ current: 'A', nodes: [
+    node({ sessionId: 'A', kind: 'root', canTakeover: true }),
+    node({ sessionId: 'B', kind: 'fork', parentId: 'A', canTakeover: true, current: false }),
+    node({ sessionId: 'C', kind: 'fork', parentId: 'B', canTakeover: false, current: false }),
+    node({ sessionId: 'D', kind: 'fork', parentId: 'C', canTakeover: false, takeoverActive: true, current: false }),
+    node({ sessionId: 'E', kind: 'autofork', parentId: 'D', ordinal: 7, canTakeover: true, current: false }),
+    node({ sessionId: 'F', kind: 'fork', parentId: null, current: false }),
+  ] })
+  try {
+    const tree = bundle.renderSlot('conversation.view')
+    const cards = bundle.stub.rows(tree)
+    for (const id of ['B', 'C', 'D', 'F']) {
+      const card = cards.find(item => item.props['data-session-id'] === id)
+      assert.match(card.props['aria-label'], /^⑂　/)
+      assert.doesNotMatch(card.props['aria-label'], /⑂0|家族根/)
+      assert.equal(card.props.style.width, '216px')
+      assert.equal(card.props.style.height, '104px')
+      const children = [...collect(card, 'span'), ...collect(card, 'button')]
+      assert.ok(children.every(child => child.props.title === undefined))
+    }
+    assert.match(cards.find(item => item.props['data-session-id'] === 'E').props['aria-label'], /^⑂7　/)
+    assert.match(cards.find(item => item.props['data-session-id'] === 'D').props['aria-label'], /已接手原会话 C/)
+    assert.deepEqual(collect(tree, 'button').filter(item => item.props['data-takeover']).map(item => item.props['data-takeover']), ['B'])
+    assert.match(bundle.stub.texts(tree).join(' '), /已接手原会话/)
+    assert.equal(bundle.fetchCalls.some(call => call.url.endsWith('/takeover')), false)
+  } finally { bundle.stop() }
+})
+
+test('侧栏 marks=0 是官方 fork 的单独⑂：空标题不漏徽标，缺记录才移除', async () => {
+  const row = makeDomElement()
+  row.setAttribute('data-row-key', 'session:B')
+  for (const text of ['', '', '', '']) {
+    const child = makeDomElement('span'); child.textContent = text; row.appendChild(child)
+  }
+  const options = { current: 'A', marks: { B: 0 }, sessionRowNodes: [row] }
+  const bundle = await mountBundle(options)
+  try {
+    const badge = () => row.querySelector('[data-autofork-mark]')
+    assert.equal(badge().textContent, '⑂')
+    await bundle.tick()
+    assert.equal(badge().textContent, '⑂')
+    options.marks.B = 3
+    await bundle.tick()
+    assert.equal(badge().textContent, '⑂3')
+    delete options.marks.B
+    await bundle.tick()
+    assert.equal(badge(), null)
+  } finally { bundle.stop() }
 })

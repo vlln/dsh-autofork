@@ -5,7 +5,7 @@
  *  · `tests/client-view.test.mjs` —— 断言渲染出的文案（「分叉」页签、设置卡片、队列行按钮）；
  *  · `scripts/preview-tab.mjs` —— 把页签渲染成可读文本，改了 UI 不用开浏览器也能先看一眼。
  *
- * **不引入任何依赖**：仓库不声明依赖、也不构建，所以 React 用一个 ~40 行的桩顶上，只实现
+ * **不引入任何依赖**：仓库不声明依赖、也不构建，所以 React 用一个有限的桩顶上，只实现
  * 本 bundle 用到的那三样（`createElement` / `useState` / `useEffect`）。`react-dom` 与
  * `@deepseek-ai/dsh-client-ui-primitives` 是**可选**的（bundle 自己 try/catch），所以这里
  * 可以按场景给或不给——给了就顺便测"官方件在场"的那条分支。
@@ -17,6 +17,7 @@ const BUNDLE = readFileSync(new URL('../client/index.js', import.meta.url), 'utf
 
 /** 本插件 Node half 的动作路由（断言 fetch 目标用）。 */
 export const FORK_PATH = '/api/dsh-autofork/fork'
+export const TAKEOVER_PATH = '/api/dsh-autofork/takeover'
 
 /**
  * 极简 React 桩：只实现本 bundle 用到的那几样。
@@ -29,17 +30,15 @@ function makeReact() {
   const react = {
     createElement(type, props) {
       const rest = Array.prototype.slice.call(arguments, 2)
-      return {
-        type,
-        props: props === null || props === undefined ? {} : props,
-        children: rest.length === 1 ? [rest[0]] : rest,
-      }
+      const { key, ...elementProps } = props ?? {}
+      if (rest.length > 0) elementProps.children = rest.length === 1 ? rest[0] : rest
+      return { type, key, props: elementProps, children: rest.length > 0 ? rest : [elementProps.children] }
     },
     /** 一次渲染内按调用顺序取值；不重渲染，所以只需要初值。 */
     useState(initial) {
       const index = cursor
       cursor += 1
-      if (store[index] === undefined) store[index] = initial
+      if (!(index in store)) store[index] = typeof initial === 'function' ? initial() : initial
       return [store[index], function () {}]
     },
     /** 渲染期不跑副作用（React 也不跑）。 */
@@ -86,6 +85,7 @@ function makeReact() {
     if (typeof element.type === 'function') return withHooks(() => render(element.type(element.props)))
     return {
       type: element.type,
+      key: element.key,
       props: element.props,
       children: (element.children ?? []).map(render).filter(child => child !== null),
     }
@@ -138,6 +138,35 @@ function makeReact() {
   return { react, render, texts, rows, buttons }
 }
 
+/** 最小 DOM 树：插入/移除维护 parentNode，查询只返回仍挂载的直接子元素。 */
+export function makeDomElement(tag = 'div') {
+  return {
+    tagName: tag.toUpperCase(), id: '', textContent: '', parentNode: null,
+    children: [], attributes: {}, style: {},
+    setAttribute(name, value) { this.attributes[name] = String(value) },
+    getAttribute(name) { return this.attributes[name] ?? null },
+    insertBefore(child, before) {
+      child.remove()
+      const index = before == null ? this.children.length : this.children.indexOf(before)
+      assert.ok(index >= 0, 'insertBefore 目标必须属于该父节点')
+      this.children.splice(index, 0, child)
+      child.parentNode = this
+    },
+    appendChild(child) { this.insertBefore(child, null) },
+    removeChild(child) {
+      const index = this.children.indexOf(child)
+      assert.ok(index >= 0, 'removeChild 目标必须属于该父节点')
+      this.children.splice(index, 1)
+      child.parentNode = null
+    },
+    remove() { this.parentNode?.removeChild(this) },
+    querySelector(selector) {
+      const attribute = /^\[([^\]]+)\]$/.exec(selector)?.[1]
+      return this.children.find(child => child.getAttribute(attribute) !== null) ?? null
+    },
+  }
+}
+
 /**
  * 造一个假的 `configForms` 服务（官方 `ConfigForms` 的读/写面，够本插件用）。
  * @param {string} initial 初始分叉方式。
@@ -188,6 +217,11 @@ function makeConfigForms(initial) {
  * @returns {Promise<any>} 桩上下文、注册表、渲染工具与调用记录。
  */
 export async function mountBundle(options = {}) {
+  const globals = new Map(['window', 'fetch', 'document', 'MutationObserver'].map(key =>
+    [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  // 每个场景从无 DOM 开始，stop 后恢复宿主，避免前一测试的 DOM 污染降级路径。
+  delete globalThis.document
+  delete globalThis.MutationObserver
   const stub = makeReact()
   const disposers = []
   /** 按槽名记注册（后注册覆盖同名槽的早注册，与真实槽注册表同义）。 */
@@ -201,6 +235,7 @@ export async function mountBundle(options = {}) {
   // 1) 拦住 `window.__ModuleLoader__.load`，拿到 bundle 的工厂
   let loaded
   globalThis.window = {
+    confirm: options.confirm,
     __ModuleLoader__: {
       load(spec) { loaded = spec },
     },
@@ -223,6 +258,10 @@ export async function mountBundle(options = {}) {
   // 3) 假的 fetch：health 探针返回服务端那份数据，动作路由回执成功
   globalThis.fetch = async (url, init) => {
     fetchCalls.push({ url: String(url), init })
+    if (String(url) === TAKEOVER_PATH) {
+      assert.equal(typeof options.takeoverResponse, 'function', '接管响应必须由用例显式提供，不能默认替用户同意')
+      return options.takeoverResponse(init)
+    }
     if (String(url).startsWith(FORK_PATH)) {
       return { ok: true, status: 200, json: async () => ({ ok: true, sessionId: 'session-head-new' }) }
     }
@@ -236,9 +275,7 @@ export async function mountBundle(options = {}) {
         /** 侧栏徽标要的两样：`{会话 id: 序号}` + 字形。 */
         marks: options.marks ?? {},
         mark: options.mark ?? '\u2442',
-        /** 家族级开关（页签上「自动回注」那个按钮的初值）。 */
-        muted: options.muted === true,
-        tools: [],
+         tools: [],
         nodes: options.nodes ?? [],
         driver: null,
         handoff: null,
@@ -249,6 +286,7 @@ export async function mountBundle(options = {}) {
   // 4) 假 DOM：只有本插件用到的几样（查询队列行、样式表宿主、DOM 观察者）
   /** 本插件注入的 `<style>` 元素（断言样式与官方 `.action` 一致用）。 */
   const styleElements = []
+  const head = makeDomElement('head')
   if (options.queueRowNodes !== undefined || options.sessionRowNodes !== undefined) {
     globalThis.document = {
       querySelectorAll: (selector) => {
@@ -257,23 +295,13 @@ export async function mountBundle(options = {}) {
         if (selector === '[data-row-key]') return options.sessionRowNodes ?? []
         return []
       },
-      getElementById: () => null,
-      createElement: () => {
-        const element = {
-          id: '',
-          textContent: '',
-          parentNode: null,
-          /** 徽标元素：`setAttribute` / `style` / `remove` 要像真 DOM 那样可用。 */
-          attributes: {},
-          style: {},
-          setAttribute(name, value) { this.attributes[name] = String(value) },
-          getAttribute(name) { return this.attributes[name] ?? null },
-          remove() { this.removed = true },
-        }
-        styleElements.push(element)
+      getElementById: id => head.children.find(element => element.id === id) ?? null,
+      createElement: tag => {
+        const element = makeDomElement(tag)
+        if (tag === 'style') styleElements.push(element)
         return element
       },
-      head: { appendChild() {} },
+      head,
       body: {},
     }
     globalThis.MutationObserver = class { observe() {} disconnect() {} }
@@ -353,7 +381,8 @@ export async function mountBundle(options = {}) {
   // 被一个 1 秒的 interval 永远吊住（这个坑踩过一次）。
   const realSetInterval = globalThis.setInterval
   const realClearInterval = globalThis.clearInterval
-  globalThis.setInterval = () => 0
+  const intervals = []
+  globalThis.setInterval = fn => { intervals.push(fn); return 0 }
   globalThis.clearInterval = () => {}
   try {
     exportsObject.apply(context)
@@ -385,7 +414,17 @@ export async function mountBundle(options = {}) {
       assert.ok(entry !== undefined, `槽 ${name} 必须注册`)
       return stub.render({ type: entry.component, props, children: [] })
     },
-    stop() { disposers.forEach(fn => { if (typeof fn === 'function') fn() }) },
+    async tick() {
+      intervals.forEach(fn => fn())
+      await new Promise(resolve => setImmediate(resolve))
+    },
+    stop() {
+      disposers.splice(0).reverse().forEach(fn => { if (typeof fn === 'function') fn() })
+      for (const [key, descriptor] of globals) {
+        if (descriptor === undefined) delete globalThis[key]
+        else Object.defineProperty(globalThis, key, descriptor)
+      }
+    },
   }
 }
 
@@ -406,6 +445,7 @@ export async function mountView(options) {
     rows: bundle.stub.rows(tree),
     opened: bundle.opened,
     fetchCalls: bundle.fetchCalls,
+    tick: bundle.tick,
     stop: bundle.stop,
   }
 }

@@ -85,8 +85,49 @@ window.__ModuleLoader__.load({
      */
     var FORK_PATH = '/api/dsh-autofork/fork'
 
-    /** 家族级动作路由：改"要不要自动回注"（与 `FORK_PATH` 同形：POST + 自定义头）。 */
+    /** 会话级动作路由：改"要不要自动回注"（与 `FORK_PATH` 同形：POST + 自定义头）。 */
     var MUTE_PATH = '/api/dsh-autofork/mute'
+    var TAKEOVER_PATH = '/api/dsh-autofork/takeover'
+
+    // 按目标 id 保留动作状态；health 轮询和页签卸载都不能覆盖另一条请求。
+    var takeoverRequests = new Map()
+    function takeoverChanged() {
+      publish(Object.assign({}, snapshot, { takeoverRevision: (snapshot.takeoverRevision || 0) + 1 }))
+    }
+    function sessionName(node, id) {
+      return (node && (node.label || node.title) || '会话') + '（' + id + '）'
+    }
+    async function requestTakeover(sessionId) {
+      var node = snapshot.nodes.find(function (item) { return item.sessionId === sessionId })
+      var prior = takeoverRequests.get(sessionId)
+      if (!node || node.kind !== 'fork' || node.canTakeover !== true || node.takeoverActive === true
+        || prior?.pending || prior?.success) return
+      var parent = snapshot.nodes.find(function (item) { return item.sessionId === node.parentId })
+      var childName = sessionName(node, sessionId)
+      var parentName = sessionName(parent, node.parentId)
+      var message = '确认由 B：' + childName + '\n接手 A：' + parentName + '？\n\n'
+        + 'A 不会被中止，仍继续运行；之后的指令交给 B。\n'
+        + 'A 的自动回传目标改为 B，仍受 A 的「自动回注」开关控制。\n'
+        + '这是接管原会话，不是切换自动回注开关。'
+      try {
+        if (typeof window.confirm !== 'function') throw new Error('当前环境无法显示确认，请在浏览器中重试')
+        if (window.confirm(message) !== true) return
+        takeoverRequests.set(sessionId, { pending: true })
+        takeoverChanged()
+        var response = await fetch(TAKEOVER_PATH, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', [FORK_HEADER]: '1' },
+          body: JSON.stringify({ sessionId: sessionId, confirmed: true }),
+        })
+        var body = await response.json()
+        if (response.ok !== true || body?.ok !== true) throw new Error(body?.error || 'http-' + response.status)
+        if (body.sessionId !== sessionId || body.parentId !== node.parentId) throw new Error('接管回执不匹配，请刷新确认状态')
+        takeoverRequests.set(sessionId, { success: true })
+      } catch (error) {
+        takeoverRequests.set(sessionId, { error: childName + ' 接管失败：' + String(error.message || error) })
+      }
+      takeoverChanged()
+    }
 
     /** 动作路由要求的自定义请求头（与 Node half 的 `FORK_HEADER` 必须一字不差）。 */
     var FORK_HEADER = 'x-dsh-autofork'
@@ -107,7 +148,7 @@ window.__ModuleLoader__.load({
      * `nextTurn.currentClaimed.has(id) || idleSteer`，而 `ReactLoopInbox.claim` 的粒度是
      * **next-turn 每轮只认领 1 条**。于是"两条卡 + 用户那条指令 + 只跑一次模型请求"在官方路径下
      * 不可能成立：卡片 = 本轮开场触发，一轮只能有一张，多一张就多一轮（= 多一次请求，用户实测报过）。
-     * 所以宿主把三条都**直接落盘**，卡片由本模块注册的节点视图渲染（形状照抄官方 trigger 卡片）。
+     * 通知与摘要走 next-step，与用户指令同批进入 inbox；本模块为未被官方触发卡接管的消息渲染卡片。
      */
     var CARD_KIND = 'autofork-message'
 
@@ -167,10 +208,15 @@ window.__ModuleLoader__.load({
     var listeners = new Set()
 
     /**
-     * 只在内容真变了才通知——否则每 2 秒一次轮询会让组件无谓重渲染。
+     * 只在内容真变了才通知——否则每次轮询会让组件无谓重渲染。
      * @param {object} next 新快照。
      */
     function publish(next) {
+      ;(next.nodes || []).forEach(function (node) {
+        if (node.takeoverActive === true && takeoverRequests.get(node.sessionId)?.success) {
+          takeoverRequests.delete(node.sessionId)
+        }
+      })
       var before = JSON.stringify(snapshot)
       var after = JSON.stringify(next)
       if (before === after) return
@@ -189,6 +235,22 @@ window.__ModuleLoader__.load({
 
     /** @returns {object} 当前快照。 */
     function getSnapshot() { return snapshot }
+
+    /**
+     * 本会话所在的**家族里有没有分叉关系**（= 要不要给「分叉」页签）。
+     *
+     * 判据就是快照里的家族节点数：服务端的 `familyNodes()` 给的是"本会话所在的那棵树"，
+     * 一条既没分叉、也不是谁的分叉的孤立会话只有它自己（长度 1）——那时页签没有可讲的东西
+     * （用户 2026-10："当 session 没有 fork 时，应该隐藏「分叉」页签"）。
+     * 还没解析出当前会话时快照的 `nodes` 是空表（长度 0），同样按"没有"处理。
+     *
+     * @param {object} state store 快照。
+     * @returns {boolean} 是否显示「分叉」页签。
+     */
+    function familyHasForks(state) {
+      var nodes = state === undefined || state === null ? undefined : state.nodes
+      return Array.isArray(nodes) && nodes.length > 1
+    }
 
     /* ------------------------------ 展示辅助 ------------------------------ */
 
@@ -210,16 +272,6 @@ window.__ModuleLoader__.load({
       hover: 'var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.10))',
       accent: 'var(--dsw-alias-state-business-primary, #0b6bcb)',
     }
-
-    /**
-     * 状态文案：与服务端 `state` 的**三态互斥**取值一一对应。
-     *
-     * 这里曾经写的是 `运行中 / 已停` 两个词，而服务端那时还并排给了"agent 在不在"与
-     * "忙不忙"两个含义不同的字段——于是"活着但空闲"的会话同时显示成运行中与已停
-     * （用户实测报的歧义）。现在两边都只有一态一个词。
-     */
-    // 只留**有实时意义**的两态；"不在本进程"不在这里（它不呈现，见 `cardFacts.live`）。
-    var STATE_TEXT = { running: '运行中', idle: '空闲' }
 
     /**
      * 头部与说明文字的宽度约束：**仍然与「对话」转写同宽居中**（一行行的文字铺满整个内容区
@@ -468,7 +520,7 @@ window.__ModuleLoader__.load({
       for (index = 0; index < nodes.length; index += 1) byId.set(nodes[index].sessionId, nodes[index])
       var lit = new Set()
       var cursor = byId.get(id)
-      while (cursor !== undefined) {
+      while (cursor !== undefined && !lit.has(cursor.sessionId)) {
         lit.add(cursor.sessionId)
         cursor = cursor.parentId === null || cursor.parentId === undefined
           ? undefined
@@ -498,7 +550,7 @@ window.__ModuleLoader__.load({
      * @returns {any} 派生事实。
      */
     function cardFacts(node, driver, now) {
-      var isRoot = node.parentId === null || node.parentId === undefined
+      var isRoot = node.kind === 'root' || (node.kind === undefined && (node.parentId === null || node.parentId === undefined))
       // 名字优先用服务端给的 `label`（**已经去掉** `<标记><序号> ` 前缀，因为徽章就是它），
       // 退回完整 `title`，再退回会话短 id。
       var label = typeof node.label === 'string' && node.label !== ''
@@ -523,8 +575,8 @@ window.__ModuleLoader__.load({
           ? { text: String(node.state), color: TOKEN.labelTertiary, tint: 'transparent' }
           : STATE_META[node.state],
         label: label,
-        badge: isRoot ? '根' : '⑂' + String(ordinal),
-        ordinal: ordinal,
+        badge: node.kind === 'fork' ? '⑂' : (isRoot ? '根' : '⑂' + String(ordinal)),
+        takeoverActive: node.takeoverActive === true,
         trigger: typeof node.trigger === 'string' ? node.trigger : '',
         /** **这条会话自己**的自动回注开关（宿主按会话下发；见 `sessionMuted`）。 */
         muted: node.muted === true,
@@ -555,7 +607,8 @@ window.__ModuleLoader__.load({
         '会话：' + node.sessionId,
         // 只有"活着"才报状态；不在本进程时**整行不出现**（不是写成"未运行"——那是噪声）。
         ...(facts.live === true ? ['状态：' + stateLine(facts)] : []),
-        facts.trigger === '' ? '触发指令：—（家族根）' : '触发指令：' + facts.trigger,
+        facts.trigger === '' ? '触发指令：—' + (facts.isRoot ? '（家族根）' : '') : '触发指令：' + facts.trigger,
+        ...(facts.takeoverActive ? ['接管：已接手原会话 ' + node.parentId] : []),
         '自动回注：' + (facts.muted ? '关（它跑完不再自动把结果投给它派生出的会话）'
           : '开（它跑完会把最后一条结果自动投给它派生出的会话）'),
         node.at === null || node.at === undefined
@@ -653,7 +706,6 @@ window.__ModuleLoader__.load({
     function HoverDetail(props) {
       var node = props.node
       var facts = cardFacts(node, props.driver, props.now)
-      var value = function (text) { return text }
       return React.createElement('div', {
         'data-dsh-autofork-hover': '',
         style: {
@@ -707,7 +759,7 @@ window.__ModuleLoader__.load({
               textOverflow: 'ellipsis',
             },
           }, facts.label),
-          chip('state', facts.meta.text, facts.meta.color, facts.meta.tint),
+          facts.live ? chip('state', facts.meta.text, facts.meta.color, facts.meta.tint) : null,
         ]),
         React.createElement('div', {
           key: 'sep',
@@ -718,7 +770,8 @@ window.__ModuleLoader__.load({
           style: { display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '0' },
         }, [
           detailRow('会话', node.sessionId),
-          detailRow('触发指令', facts.trigger === '' ? '—（家族根）' : facts.trigger, {
+          facts.takeoverActive ? detailRow('接管', '已接手原会话 ' + node.parentId) : null,
+          detailRow('触发指令', facts.trigger === '' ? (facts.isRoot ? '—（家族根）' : '—') : facts.trigger, {
             quote: facts.trigger !== '',
           }),
           detailRow('分叉于', node.at === null || node.at === undefined
@@ -740,8 +793,7 @@ window.__ModuleLoader__.load({
      * 前缀形状由宿主 half 的 `senderPrefixed()` 决定（`分叉会话 <id> 发来消息（它在等你回复）：`），
      * 而卡片**已经**在标题行写了发送方与「等待回复」胶囊 ⇒ 正文里再来一遍是重复（用户 2026-10）。
      *
-     * ⚠️ **只在形状完全匹配时才剥**，不匹配就原样显示：正文是**模型可见文本**，呈现层不许对它做
-     * 模糊处理（猜着切就会把正文本身切掉）。
+     * 只按宿主给出的有效偏移切片，不猜测前缀语法；缺失或越界时原样显示。
      * @param {string} text 模型可见正文。
      * @returns {string} 呈现用正文。
      */
@@ -777,11 +829,12 @@ window.__ModuleLoader__.load({
       var hover = props.hovered === true
       var meta = facts.meta
       var label = facts.label
-      var ordinal = facts.ordinal
       var trigger = facts.trigger
       var rel = facts.rel
-      var clock = facts.clock
       var showState = facts.live === true
+      var takeover = takeoverRequests.get(node.sessionId) || {}
+      var takeoverControl = node.kind === 'fork' && (node.canTakeover === true || facts.takeoverActive || takeover.success || takeover.pending)
+      var takeoverLabel = facts.takeoverActive ? '已接手原会话' : (takeover.success ? '接管已确认' : (takeover.pending ? '接管中…' : '接手原会话'))
 
       var navigate = function () { if (!isCurrent) navTo(node.sessionId) }
       return React.createElement('div', {
@@ -798,6 +851,7 @@ window.__ModuleLoader__.load({
         title: reactDom === undefined ? detailText(node, facts) : undefined,
         onClick: navigate,
         onKeyDown: function (event) {
+          if (event.target !== event.currentTarget) return
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault()
             navigate()
@@ -857,7 +911,7 @@ window.__ModuleLoader__.load({
               fontSize: '12px',
               fontWeight: '600',
             },
-          }, isRoot ? '根' : '⑂' + String(ordinal)),
+          }, facts.badge),
           React.createElement('div', {
             key: 'label',
             style: {
@@ -886,7 +940,7 @@ window.__ModuleLoader__.load({
             role: 'switch',
             tabIndex: 0,
             'data-mute-toggle': node.sessionId,
-            'aria-checked': facts.muted ? 'true' : 'false',
+            'aria-checked': facts.muted ? 'false' : 'true',
             'aria-label': '自动回注',
             onClick: function (event) {
               if (event !== undefined && typeof event.stopPropagation === 'function') event.stopPropagation()
@@ -956,10 +1010,30 @@ window.__ModuleLoader__.load({
           style: { marginTop: 'auto', display: 'flex', alignItems: 'center', gap: '6px', minWidth: '0' },
         }, [
           showState ? chip('state', meta.text, meta.color, meta.tint) : null,
-          isCurrent ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+          isCurrent && !takeoverControl ? chip('here', '你在这里', TOKEN.accent, 'rgba(11, 107, 203, 0.12)') : null,
+          takeoverControl ? (facts.takeoverActive || takeover.success
+            ? React.createElement('span', {
+              key: 'takeover', role: 'status', 'data-takeover-state': node.sessionId,
+              style: { marginLeft: 'auto', fontSize: '11px', whiteSpace: 'nowrap', color: TOKEN.labelSecondary },
+            }, takeoverLabel)
+            : React.createElement('button', {
+              key: 'takeover', type: 'button', 'data-takeover': node.sessionId,
+              disabled: takeover.pending === true,
+              'aria-busy': takeover.pending === true,
+              'aria-label': takeoverLabel + '：' + sessionName(node, node.sessionId) + ' 接手 ' + node.parentId,
+              onClick: function (event) {
+                event.stopPropagation()
+                requestTakeover(node.sessionId)
+              },
+              // 原生按钮由浏览器处理 Enter/Space；只拦冒泡，不手工再提交一次。
+              onKeyDown: function (event) { event.stopPropagation() },
+              style: { marginLeft: 'auto', padding: '2px 0', border: 'none', background: 'transparent',
+                color: TOKEN.accent, font: 'inherit', fontSize: '11px', whiteSpace: 'nowrap',
+                cursor: takeover.pending ? 'default' : 'pointer', opacity: takeover.pending ? 0.55 : 1 },
+            }, takeoverLabel)) : null,
 
-          // 卡只有 176px 宽，所以这里用紧凑写法；完整含义留在 tooltip 上。
-          (isDriver && !isCurrent)
+          // 卡片宽度有限，所以这里用紧凑写法；完整含义留在 tooltip 上。
+          (isDriver && !isCurrent && !takeoverControl)
             ? React.createElement('span', {
               key: 'driver',
               style: { flex: 'none', fontSize: '11.5px', lineHeight: '17px', color: TOKEN.labelSecondary },
@@ -1588,10 +1662,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * 注入本插件的那几行样式（表里的 `:hover` 没法用内联样式表达）。
-     * @returns {Function} 卸载函数；本次没创建时是空操作。
-     */
     /* ------------------------- 卡片（消息卡，照抄官方 trigger 观感） ------------------------- */
 
     /**
@@ -1718,7 +1788,6 @@ window.__ModuleLoader__.load({
     function registerAutoforkCards(ctx, slots) {
       if (typeof ctx.inject !== 'function' || slots === undefined) return function () {}
       var disposeStyles = installCardStyles()
-      var disposeSlot = function () {}
       var disposeEvents = function () {}
       try {
         ctx.inject(['uiConversation'], function (conversationCtx) {
@@ -1797,7 +1866,6 @@ window.__ModuleLoader__.load({
         postNote('card.failed: ' + String(error))
       }
       return function () {
-        disposeSlot()
         disposeEvents()
         disposeStyles()
       }
@@ -1883,9 +1951,6 @@ window.__ModuleLoader__.load({
       var hover = hoverPair[0]
       var setHover = hoverPair[1]
 
-      // 页签级状态取自 store（`useState(getSnapshot())` + 订阅）。
-      var current = (pair[0] === undefined || pair[0] === null ? {} : pair[0]).current
-
       /**
        * 切换**某一条会话**的自动回注（0.9.0 起按会话独立，不再是家族级）。
        *
@@ -1947,16 +2012,27 @@ window.__ModuleLoader__.load({
       var driver = snap.driver === undefined ? null : snap.driver
 
       var children = []
+      // 错误不塞进 216×104 卡片，也不只写 debug；按节点显示，切页后仍可回来查看。
+      nodes.forEach(function (node) {
+        var action = takeoverRequests.get(node.sessionId)
+        if (action?.error) children.push(React.createElement('div', {
+          key: 'takeover-error-' + node.sessionId, role: 'alert',
+          style: Object.assign({ fontSize: '12px', overflowWrap: 'anywhere',
+            color: 'var(--dsw-alias-state-danger-primary, #c33)' }, COLUMN_STYLE),
+        }, action.error))
+      })
       if (nodes.length === 0) {
+        // 只在"快照此刻没有家族数据"的那一帧出现（切换会话 / 首次轮询未回）。页签本身
+        // 只在家族里真有分叉时才注册（见 `familyHasForks`），所以空态不是常态。
         children.push(React.createElement('div', { key: 'loading', style: HINT_STYLE }, '正在读取分叉关系…'))
       } else {
         var running = nodes.filter(function (node) { return node.state === 'running' }).length
         // 一行说完：几条会话、几条还在跑。原来那句"点任意一行切到那条会话；缩进表示它是从哪条
-        // 分出去的"是纯操作说明（用户反馈"文字太多"）——行本身就是按钮、缩进也看得出来，
-        // 所以删掉；只有在"还没有分叉"时才留一句引导（那时用户确实需要知道怎么产生分叉）。
+        // 分出去的"是纯操作说明（用户反馈"文字太多"）——行本身就是按钮、缩进也看得出来，所以
+        // 删掉；`还没有分叉` 那句也随页签显隐一起去掉（用户 2026-10：没有分叉时页签根本不出现，
+        // 留着的唯一效果是在"切到一条孤立会话"的那一帧里说一句与当前会话不符的话）。
         var summary = [String(nodes.length) + ' 条会话']
         if (running > 0) summary.push(String(running) + ' 条在跑')
-        if (nodes.length === 1) summary.push('还没有分叉')
         children.push(React.createElement('div', {
           key: 'summary',
           style: Object.assign({
@@ -2152,7 +2228,7 @@ window.__ModuleLoader__.load({
        */
       function syncRowMarks(marks, mark) {
         if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
-        if (mark === '' || mark === undefined || mark === null) return
+        mark = typeof mark === 'string' ? mark : ''
         var wanted = marks !== null && marks !== undefined && typeof marks === 'object' ? marks : {}
         var rows
         try {
@@ -2179,11 +2255,11 @@ window.__ModuleLoader__.load({
       function syncRowMark(row, wanted, mark) {
         if (row === null || row === undefined) return
         var key = typeof row.getAttribute === 'function' ? String(row.getAttribute(ROW_KEY_ATTR) ?? '') : ''
-        if (key.indexOf('session:') !== 0) return
-        var sessionId = key.slice('session:'.length)
-        var ordinal = wanted[sessionId]
         var existing = typeof row.querySelector === 'function' ? row.querySelector('[' + MARK_ATTR + ']') : null
-        var active = typeof ordinal === 'number' && ordinal > 0
+        var sessionId = key.indexOf('session:') === 0 ? key.slice('session:'.length) : ''
+        var ordinal = wanted[sessionId]
+        var active = sessionId !== '' && mark !== '' && Number.isInteger(ordinal) && ordinal >= 0
+        var text = mark + (ordinal === 0 ? '' : String(ordinal))
         // 官方行结构是 `slot / title / time / rowActions` ⇒ 无徽标时标题 = `children[1]`。
         //
         // ⚠️ 有徽标时它**就在 index 1**（我们总插在标题前面）⇒ 标题顺延到 `children[2]`。
@@ -2193,7 +2269,7 @@ window.__ModuleLoader__.load({
         var title = kids !== undefined ? kids[1] : undefined
         if (existing !== null && existing !== undefined && title === existing) title = kids[2]
         var titleText = title !== undefined && title !== null ? String(title.textContent ?? '') : ''
-        if (active && titleText.indexOf(mark + String(ordinal)) === 0) {
+        if (active && (titleText === text || titleText.indexOf(text + ' ') === 0)) {
           // 旧会话的标题自带标记 ⇒ 不插徽标（否则重复）。
           if (existing !== null && existing !== undefined) existing.remove()
           return
@@ -2202,7 +2278,10 @@ window.__ModuleLoader__.load({
           if (existing !== null && existing !== undefined) existing.remove()
           return
         }
-        var text = mark + String(ordinal)
+        if (title === undefined || title === null) {
+          if (existing !== null && existing !== undefined) existing.remove()
+          return
+        }
         if (existing !== null && existing !== undefined) {
           if (existing.textContent !== text) existing.textContent = text
           return
@@ -2478,18 +2557,48 @@ window.__ModuleLoader__.load({
       // （`id:'trajectory', order:10`）。所以这里注册出来的 tab 与「对话」「轨迹」完全同族，
       // 不需要自己造导航，也不碰任何我无法在服务端验证的私有契约。
       //
+      // **家族里没有分叉就不注册这一条**（用户 2026-10："当 session 没有 fork 时，应该隐藏
+      // 「分叉」页签"）。一条孤立会话没有家族可讲，常驻一个空页签只是噪声。做法是让**这一条
+      // list 条目**跟着快照注册 / 注销：官方自己订阅 `conversation.view` 的变更重算 tab 列表
+      // （`ui-conversation` 的 `refreshViews`），所以显隐不需要碰任何官方 DOM，也不必在这边
+      // 维护第二套"可见性"状态。代价是切换会话后最多晚一个轮询周期（≤1s）才收起页签。
+      //
       // 组件的状态全部来自本模块的 store（轮询写入），**不读槽位 props**：少依赖一个契约，
       // 就少一处只能在浏览器里才暴露的失败模式。
       if (slots !== undefined) {
         slots.inject('conversation.view', function () {
-          report('view.mounted')
-          return slots.register({
-            name: 'conversation.view',
-            id: 'branch',
-            order: 20,
-            label: function () { return '分叉' },
-            inject: function () { return {} },
-          }, BranchView)
+          /** 已注册条目的卸载函数；null = 此刻没有页签。 */
+          var disposeEntry = null
+          /**
+           * 让页签存在与否跟上快照。只在**真的翻转**时动槽（注册会触发官方重算整张 tab 列表）。
+           */
+          var sync = function () {
+            var want = familyHasForks(getSnapshot())
+            if (want === (disposeEntry !== null)) return
+            if (want) {
+              disposeEntry = slots.register({
+                name: 'conversation.view',
+                id: 'branch',
+                order: 20,
+                label: function () { return '分叉' },
+                inject: function () { return {} },
+              }, BranchView)
+              report('view.shown')
+            } else {
+              disposeEntry()
+              disposeEntry = null
+              report('view.hidden')
+            }
+          }
+          var unsubscribe = subscribe(sync)
+          sync()
+          return function () {
+            unsubscribe()
+            if (disposeEntry !== null) {
+              disposeEntry()
+              disposeEntry = null
+            }
+          }
         })
 
         // 手动分叉的「分叉」按钮：注册进 `conversation.input.dock`（list 槽，与官方队列条 /
@@ -2506,7 +2615,7 @@ window.__ModuleLoader__.load({
         })
 
         // 消息卡：分叉通知 / 在飞摘要 / 后台回传三条长成官方那种卡片。
-        // 宿主**直接落盘**这三条（不占 turn），所以卡片必须由本模块自己画，见 CARD_KIND 的注释。
+        // inbox 消息未被官方触发卡接管时，由本模块渲染，见 CARD_KIND。
         cardStyles = registerAutoforkCards(ctx, slots)
 
         // Plugins 页上本插件的设置卡片（分叉方式）。走嵌套 inject，见 registerForkSettings。
@@ -2532,12 +2641,13 @@ window.__ModuleLoader__.load({
       // （`dsh-client-ui-chat/client` 不导出转写渲染器、`ConversationViewRegistry` 没有
       // 跨 session 派发的 API、`page`/`follow` 两个 RPC 都是 session-addressed）。
       // 现在的「分叉」页签**不渲染别的会话的转写**，只画关系 + 负责跳转，所以不受那条结论影响。
-      // 全部实证见 docs/proposal-session-container-view.md 与 AGENTS.local.md 事实 11。
+      // 原生转写不可跨会话内嵌；此处只展示关系并跳转。
 
       ctx.effect(function () {
         return function () {
           stopped = true
           stopPolling()
+          syncRowMarks({}, '')
           if (styles !== null) {
             styles()
             styles = null

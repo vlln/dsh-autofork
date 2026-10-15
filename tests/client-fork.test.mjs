@@ -17,7 +17,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { FORK_PATH, mountBundle } from './react-stub.mjs'
+import { FORK_PATH, TAKEOVER_PATH, mountBundle } from './react-stub.mjs'
 
 /**
  * 造一条队列投影行（形状与 `ui-conversation` 的 `QueueDock` 读的 `inbox['next-turn']` 一致）。
@@ -154,7 +154,8 @@ test('设置卡片：渲染出两种方式与说明，点「手动分叉」写�
   await flush()
 
   assert.deepEqual(bundle.writes, [[{ op: 'set', path: ['forkMode'], value: 'manual' }]])
-  assert.equal(text.includes('改动未被接受'), false, '写入成功时不得显示失败提示')
+  assert.equal(bundle.fetchCalls.some(call => call.url.includes('settings.write-refused')), false,
+    '写入成功时不得报告拒绝；静态渲染桩不验证更新后的错误 UI')
   bundle.stop()
 })
 
@@ -321,7 +322,7 @@ test('分叉按钮：非手动模式、没有排队指令、或在等宿主接�
   echo.stop()
 })
 
-test('分叉按钮：队列面板收起（行不在 DOM 里）时退回一条右对齐的回退条，功能仍在', async () => {
+test('分叉按钮：缺少 react-dom 时退回右对齐回退条，功能仍在', async () => {
   // 不给 `queueRowNodes` ⇒ 桩里的 `react-dom` 也拿不到 ⇒ 走回退分支（与"面板收起"同一形状）。
   const bundle = await mountBundle({ current: 'session-parent', mode: 'manual' })
   const entry = bundle.registry.get('conversation.input.dock')
@@ -403,7 +404,6 @@ test('消息卡：注册 conversation.chat.node 视图 + 只认本插件标记�
 
   const header = folded.children[0]
   assert.equal(typeof header.props.onClick, 'function', '头行可点击（折叠/展开）')
-  header.props.onClick()  // 桩的 useState 是只读的，展开态由真 GUI 验证（见工程笔记）
 
   // `steer`（跨会话消息，工具名 `fork_send`）也走卡片——这是**唯一**能给它人类可读名字的途径：
   // 官方 `contextProducer` 对未识别的 kind 直接 `label: kind`，所以老的 notice 形状在界面上叫
@@ -479,7 +479,14 @@ test('页签：挂稳定视图标记，并藏掉官方共享的左右拖动宽�
   // 用户实测：插件页签上出现了「对话」页签用来调转写宽度的两条 col-resize 竖线。
   // 根因是 `conversation.view` 各页签**共用**会话内容区，而宽度手柄由外壳渲染
   // （`ConversationWidthControls`，与"当前是哪个页签"无关）⇒ 它跟着出现了。
-  const bundle = await mountBundle({ current: 'session-parent', mode: 'auto', queueRowNodes: [] })
+  // 家族里给两条会话：页签只在有分叉时注册（显隐判据的用例在 client-view.test.mjs）。
+  const bundle = await mountBundle({
+    current: 'session-parent', mode: 'auto', queueRowNodes: [],
+    nodes: [
+      { sessionId: 'session-parent', label: '原会话', kind: 'root', parentId: null },
+      { sessionId: 'session-head', label: '新会话', kind: 'autofork', parentId: 'session-parent' },
+    ],
+  })
 
   // ① 视图根元素带稳定标记（官方 CSS module 类名是哈希，只能锚 data 属性）
   const entry = bundle.registry.get('conversation.view')
@@ -516,4 +523,157 @@ test('当前会话：读 `retainedBy.mainView`（唯一可达来源），不变�
   assert.ok(urls.some(url => url.includes('note=current.multiple')),
     '不变量被破要上报：\n' + urls.filter(u => u.includes('note=')).join('\n'))
   multiple.stop()
+})
+
+test('分叉按钮：react-dom 在场但队列行缺席时仍提供回退入口', async () => {
+  const bundle = await mountBundle({ current: 'session-parent', mode: 'manual', queueRowNodes: [] })
+  try {
+    const tree = bundle.renderSlot('conversation.input.dock', dockProps({ inbox: { 'next-turn': [inboxRow('m-hidden', '收起的指令')] } }))
+    assert.equal(portalsOf(tree).length, 0)
+    const buttons = buttonsOf(tree)
+    assert.equal(buttons.length, 1)
+    buttons[0].props.onClick()
+    await flush()
+    const action = bundle.fetchCalls.find(call => call.url === FORK_PATH)
+    assert.deepEqual(JSON.parse(action.init.body), { sessionId: 'session-parent', messageId: 'm-hidden' })
+  } finally { bundle.stop() }
+})
+
+test('React 桩把 children 传给可选 Tooltip，而不把 key 当普通 props', async () => {
+  const bundle = await mountBundle({ current: 'session-parent', mode: 'manual', primitives: {
+    Tooltip(props) { return props.children },
+  } })
+  try {
+    const element = bundle.stub.react.createElement('span', { key: 'identity' }, '正文')
+    assert.equal(element.props.key, undefined)
+    assert.equal(element.key, 'identity')
+    const tree = bundle.renderSlot('conversation.input.dock', dockProps({ inbox: { 'next-turn': [inboxRow('m-1', '甲')] } }))
+    assert.equal(buttonsOf(tree).length, 1, 'Tooltip 不能吞掉按钮')
+    assert.equal(buttonsOf(tree)[0].props.title, undefined, '官方提示在场不叠原生 title')
+  } finally { bundle.stop() }
+})
+
+
+function takeoverOptions(extra = {}) {
+  return { current: 'A', nodes: [
+    { sessionId: 'A', label: '原会话', kind: 'root', parentId: null, state: 'running', muted: true },
+    { sessionId: 'B', label: '新会话', kind: 'fork', parentId: 'A', state: 'idle', canTakeover: true },
+    { sessionId: 'C', label: '其他分叉', kind: 'fork', parentId: 'A', canTakeover: true },
+  ], ...extra }
+}
+/**
+ * 渲染「分叉」页签；**家族里没有分叉时页签根本没注册**（用户 2026-10 定的显隐），
+ * 那时返回 undefined——与"注册了但没有这个按钮"是两件事，用例按需分别断言。
+ */
+const viewTree = bundle => {
+  const entry = bundle.registry.get('conversation.view')
+  return entry === undefined ? undefined : bundle.stub.render({ type: entry.component, props: {}, children: [] })
+}
+const takeoverButton = (bundle, id = 'B') => {
+  const tree = viewTree(bundle)
+  return tree === undefined ? undefined : buttonsOf(tree).find(button => button.props['data-takeover'] === id)
+}
+const takeoverPosts = bundle => bundle.fetchCalls.filter(call => call.url === TAKEOVER_PATH)
+const clickEvent = () => ({ stopped: false, stopPropagation() { this.stopped = true } })
+
+test('官方接管：默认零请求，取消不 POST；确认说明明确 B 接手 A，且不触发导航', async () => {
+  const prompts = []
+  const bundle = await mountBundle(takeoverOptions({ confirm: text => { prompts.push(text); return false } }))
+  try {
+    assert.equal(takeoverPosts(bundle).length, 0)
+    const button = takeoverButton(bundle)
+    assert.equal(button.props.type, 'button')
+    assert.match(button.props['aria-label'], /新会话.*B.*接手 A/)
+    assert.equal(button.props.title, undefined)
+    const event = clickEvent()
+    button.props.onClick(event)
+    assert.equal(event.stopped, true)
+    for (const key of ['Enter', ' ']) {
+      const keyboard = { ...clickEvent(), key }
+      button.props.onKeyDown(keyboard)
+      assert.equal(keyboard.stopped, true)
+    }
+    assert.equal(prompts.length, 1, '键盘原生 click 负责提交，keydown 不重复提交')
+    assert.match(prompts[0], /B：新会话（B）\n接手 A：原会话（A）/)
+    for (const text of ['A 不会被中止', '之后的指令交给 B', '自动回传目标改为 B', '仍受 A', '不是切换自动回注开关']) assert.ok(prompts[0].includes(text))
+    await flush()
+    assert.equal(takeoverPosts(bundle).length, 0)
+    assert.deepEqual(bundle.opened, [])
+    const card = bundle.stub.rows(bundle.renderSlot('conversation.view')).find(row => row.props['data-session-id'] === 'B')
+    card.props.onClick()
+    await flush()
+    assert.deepEqual(bundle.opened, ['B'], '普通点击仍可导航')
+  } finally { bundle.stop() }
+})
+
+test('官方接管：pending 防重复、轮询/切页保持按 id 状态、成功等待权威 active', async () => {
+  let resolve
+  let confirmations = 0
+  const options = takeoverOptions({ confirm: () => { confirmations++; return true }, takeoverResponse: () => new Promise(done => { resolve = done }) })
+  const bundle = await mountBundle(options)
+  try {
+    const button = takeoverButton(bundle)
+    button.props.onClick(clickEvent())
+    button.props.onClick(clickEvent())
+    assert.equal(confirmations, 1)
+    assert.equal(takeoverPosts(bundle).length, 1)
+    const post = takeoverPosts(bundle)[0]
+    assert.equal(post.init.method, 'POST')
+    assert.equal(post.init.headers['x-dsh-autofork'], '1')
+    assert.deepEqual(JSON.parse(post.init.body), { sessionId: 'B', confirmed: true })
+    assert.equal(takeoverButton(bundle).props.disabled, true)
+    assert.equal(takeoverButton(bundle).props['aria-busy'], true)
+    const saved = options.nodes
+    options.current = 'other'
+    options.nodes = [{ sessionId: 'other', kind: 'root', parentId: null }]
+    await bundle.tick()
+    // 切到一条**没有分叉**的会话：整张页签都不在了（不只是按钮消失）。
+    assert.equal(bundle.registry.has('conversation.view'), false, '孤立会话不显示「分叉」页签')
+    assert.equal(takeoverButton(bundle), undefined)
+    options.current = 'A'; options.nodes = saved
+    await bundle.tick()
+    assert.ok(bundle.registry.has('conversation.view'), '切回有分叉的会话，页签回来')
+    assert.equal(takeoverButton(bundle).props.disabled, true, '重新挂载后仍按 id 记得 pending')
+    assert.equal(takeoverButton(bundle, 'C').props.disabled, false)
+    resolve({ ok: true, status: 200, json: async () => ({ ok: true, parentId: 'A', sessionId: 'B' }) })
+    await flush()
+    assert.equal(takeoverButton(bundle), undefined)
+    assert.match(bundle.stub.texts(bundle.renderSlot('conversation.view')).join(' '), /接管已确认/)
+    options.nodes[1].takeoverActive = true; options.nodes[1].canTakeover = false
+    await bundle.tick()
+    assert.match(bundle.stub.texts(bundle.renderSlot('conversation.view')).join(' '), /已接手原会话/)
+    assert.equal(takeoverButton(bundle), undefined)
+    assert.deepEqual(bundle.opened, [])
+    assert.equal(options.nodes[0].muted, true)
+  } finally { bundle.stop() }
+})
+
+test('官方接管：业务/HTTP/网络/无确认能力失败均可见，能显式重试', async () => {
+  for (const mode of ['business', 'http', 'network', 'confirm-unavailable']) {
+    const options = takeoverOptions({ confirm: mode === 'confirm-unavailable' ? undefined : () => true,
+      takeoverResponse: async () => {
+        if (mode === 'network') throw new Error('offline')
+        return { ok: mode !== 'http', status: 409, json: async () => ({ ok: false, error: 'takeover-conflict' }) }
+      } })
+    const bundle = await mountBundle(options)
+    try {
+      takeoverButton(bundle).props.onClick(clickEvent())
+      await flush()
+      const tree = bundle.renderSlot('conversation.view')
+      const errors = byRole(tree, 'alert')
+      assert.equal(errors.length, 1)
+      assert.match(bundle.stub.texts(errors[0]).join(''), /新会话（B） 接管失败/)
+      assert.equal(takeoverButton(bundle).props.disabled, false)
+      await bundle.tick()
+      assert.equal(byRole(bundle.renderSlot('conversation.view'), 'alert').length, 1)
+      assert.equal(takeoverButton(bundle, 'C').props.disabled, false)
+      if (mode === 'confirm-unavailable') assert.equal(takeoverPosts(bundle).length, 0)
+      else {
+        takeoverButton(bundle).props.onClick(clickEvent())
+        await flush()
+        assert.equal(takeoverPosts(bundle).length, 2)
+      }
+      assert.deepEqual(bundle.opened, [])
+    } finally { bundle.stop() }
+  }
 })
