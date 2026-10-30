@@ -13,7 +13,8 @@
 在已有的 DSH Web 环境中运行：
 
 ```sh
-dsh plugin --profile web add github:vlln/dsh-autofork
+dsh plugin --profile web add @vlln/dsh-autofork
+# 想跟最新提交而不是发布版：dsh plugin --profile web add github:vlln/dsh-autofork
 ```
 
 ## 兼容性

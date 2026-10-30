@@ -133,6 +133,9 @@ function harness(options = {}) {
     lineageSettingWrites: [],
     /** 血缘域被打开过几次（每次 apply 一次）。 */
     lineageOpens: [],
+    /** 恢复时 `agentPresets.resolve()` / `mount()` 的调用记录（0.16.0 的裸 resume 修复）。 */
+    presetResolves: [],
+    presetMounts: [],
   }
 
   /** 父 agent（被分叉的那个）。 */
@@ -234,6 +237,9 @@ function harness(options = {}) {
             session: { id: opts.resumeSessionId, header: { id: opts.resumeSessionId } },
             steer: (message) => { calls.steers.push(message) },
           }
+          // `setup` 必须真的跑（0.16.0）：真实工厂在发布 agent 之前 await `setup`，preset
+          // 恰恰是在那里 mount 的。桩吞掉它，"恢复必须挂 preset / 带模型"这条回归钉就测不到。
+          if (typeof opts.setup === 'function') await opts.setup(revived, revived)
           createdAgents.set(opts.resumeSessionId, revived)
           return { agent: revived }
         },
@@ -297,6 +303,7 @@ function harness(options = {}) {
     // 需要"head 正忙"的场景用 options.childProjection 显式给。
     sessionProjections: {
       stateOf: (session, key) => {
+        if (key === 'agentPreset') return options.parentPreset
         if (key !== 'turnBoundary') return undefined
         if (session?.id !== undefined && session.id !== 'session-parent') {
           const raw = options.childProjection
@@ -306,7 +313,17 @@ function harness(options = {}) {
         return projection
       },
     },
-    agentPresets: { composeFrom: (agentCtx, parentCtx) => { calls.composeFrom = [agentCtx, parentCtx]; return 'standard' } },
+    agentPresets: {
+      composeFrom: (agentCtx, parentCtx) => { calls.composeFrom = [agentCtx, parentCtx]; return 'standard' },
+      /** 恢复时用的 preset 组合（官方 `composeAgent()` 的两步；见 `composeForResume`）。 */
+      resolve: async (presetId) => {
+        calls.presetResolves.push(presetId)
+        return { id: presetId ?? 'standard' }
+      },
+      mount: async (agentCtx, presetId) => {
+        calls.presetMounts.push({ agentCtx, presetId })
+      },
+    },
     agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
     tools: { register: (tool) => { calls.registeredTools.push(tool); return () => {} } },
     webServer: { register: (route) => { calls.routes.push(route); return () => {} } },
@@ -612,6 +629,25 @@ test('running + 长 step + 有已完成 turn → 抢占消息、建分叉、注�
     assert.equal(typeof source.summary, 'string')
     assert.ok(source.summary.length > 0 && source.summary.length <= 120, source.summary)
   }
+})
+
+test('分叉把 worker 的 preset 记进 head 的 header（恢复侧靠它挂回同一套 preset）', async () => {
+  // 0.16.0：`setup: composeInto` 只在**创建这一刻**有效。head 从盘上恢复时，恢复侧只能靠
+  // header / `agent-preset/selected` 投影决定挂哪套 preset —— 官方 `fork()` 写的就是
+  // `composition.agentPreset`。不记它，恢复只能退回部署默认（工具表、prompt 段、UI 贡献都变）。
+  const withPreset = harness({ parentPreset: 'standard' })
+  applyChain(withPreset.ctx, undefined)
+  withPreset.emitInsert(userMessage())
+  await flush()
+  assert.equal(withPreset.calls.agentsCreate[0].meta.agentPreset, 'standard',
+    'worker 有 preset 时必须记进 head 的 header')
+
+  const withoutPreset = harness()
+  applyChain(withoutPreset.ctx, undefined)
+  withoutPreset.emitInsert(userMessage())
+  await flush()
+  assert.equal('agentPreset' in withoutPreset.calls.agentsCreate[0].meta, false,
+    '读不到 preset 时不得凭空写一个（undefined 会让 header 多一个空字段）')
 })
 
 test('三个调度工具被注册（默认参数）', async () => {
@@ -2681,6 +2717,16 @@ test('fork_send 对**不在本进程**的家族成员：先恢复再投递（不
   )
   assert.equal(result.ok, true, '不该再回绝（"任意 session 都可以恢复"）')
   assert.equal(calls.agentsResume.at(-1)?.resumeSessionId, 'session-parent', '要走官方恢复入口')
+  // ⚠️ 0.16.0 回归钉：**裸 resume 会恢复出一个没有模型、没有 preset 的 agent** ——
+  // `agent.options.model` 是 undefined ⇒ `systemPrompt.variable('model')` 取不到值 ⇒ 每一轮
+  // 都在 prompt 组装阶段立刻失败（`prompt variable "{{model}}" has no value …`）。用户实测的
+  // 「A 跑完回注到 B，B 什么都没发生」就是这么来的：回注投递成功，但模型请求根本没发出去。
+  const resumeOptions = calls.agentsResume.at(-1)
+  assert.deepEqual(resumeOptions.agentOptions, { provider: 'p', model: 'm' },
+    '恢复必须带模型选择（裸 resume 的 agent.options.model 是 undefined）')
+  assert.equal(typeof resumeOptions.setup, 'function', '恢复必须带 preset 组合（setup）')
+  assert.deepEqual(calls.presetResolves.at(-1), undefined, '会话没记录 preset ⇒ 用部署默认')
+  assert.equal(calls.presetMounts.at(-1)?.presetId, 'standard', 'setup 必须真的 mount preset')
   assert.equal(ctx.agents.get('session-parent') !== undefined, true, '恢复之后它是活的')
   assert.equal(calls.steers.length, 1, '恢复之后照常投递')
   assert.match(result.detail, /已自动恢复/, '回执要说明它此前不在运行、被唤醒了')
@@ -2705,7 +2751,11 @@ test('fork_send 恢复失败（会话正被别的进程打开）：如实回报�
   assert.equal(result.ok, false, '恢复不了就必须如实失败')
   assert.match(result.detail, /无法恢复/, '把可能的原因说清（正被另一个进程打开）')
   assert.equal(failing.calls.steers.length, 0, '失败时不得有任何投递')
-  assert.deepEqual(failing.calls.agentsResume, [{ resumeSessionId: 'session-parent' }], '确实尝试恢复目标，失败不是提前拒绝')
+  assert.deepEqual(
+    failing.calls.agentsResume.map(options => ({ ...options, setup: typeof options.setup })),
+    [{ resumeSessionId: 'session-parent', agentOptions: { provider: 'p', model: 'm' }, setup: 'function' }],
+    '确实尝试恢复目标（带模型与 preset 组合），失败不是提前拒绝',
+  )
 })
 
 test('宿主没有 agents.resume：降级成"无法恢复"，不假装成功', async () => {

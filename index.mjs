@@ -271,8 +271,35 @@ export function apply(ctx, config) {
   /* ------------------------------ 可选能力 ------------------------------ */
 
   let composeInto = () => undefined
+  /**
+   * 恢复一条**已落盘**会话时的 preset 组合。
+   *
+   * 与官方 `session-controller` 的 `composeAgent()` 同形：按会话投影里的 preset id
+   * （没有就是部署默认）`resolve` 一次，再在 agent 自己的 ctx 上 `mount`。
+   *
+   * ⚠️ **这不是可选的装饰**（0.16.0 修的真 bug）。`ctx.agents.resume({resumeSessionId})`
+   * 不传 `setup` 时，恢复出来的 agent **没有挂任何 preset**：`agent.options` 是 `{}`，
+   * 于是 `systemPrompt.variable('model')`（= `context.agent?.options.model`）取到 undefined，
+   * 每一轮都在 prompt 组装阶段立刻失败：
+   *
+   *     prompt variable "{{model}}" has no value for this assembly
+   *     (section "deployment:persona-prefix")
+   *
+   * 用户实测的「A 跑完回注到 B，B 却什么都没发生」就是这一条：回注投递成功、turn 也开了，
+   * 但模型请求根本没发出去，注入的消息永远落不到 B 的转写上。同一条裸 resume 还会让
+   * **打开**那条会话时转写变成全空（只剩「加载更早」与输入框）——隔离实例里复现过：
+   * 冷打开 139 个节点，裸 resume 之后同一会话只剩 2 个。
+   */
+  let composeForResume
   ctx.inject(['agentPresets'], (capabilityCtx) => {
-    composeInto = (agentCtx, parentCtx) => capabilityCtx.agentPresets.composeFrom(agentCtx, parentCtx)
+    const presets = capabilityCtx.agentPresets
+    composeInto = (agentCtx, parentCtx) => presets.composeFrom(agentCtx, parentCtx)
+    composeForResume = async (agentCtx, agent) => {
+      if (typeof presets?.resolve !== 'function' || typeof presets?.mount !== 'function') return
+      const recorded = ctx.sessionProjections?.stateOf?.(agent.session, 'agentPreset')
+      const resolved = await presets.resolve(recorded ?? undefined)
+      await presets.mount(agentCtx, resolved.id)
+    }
   })
 
   let currentSelection = () => undefined
@@ -1411,6 +1438,9 @@ export function apply(ctx, config) {
     const headId = `session-${randomUUID()}`
     const workerCtx = worker.ctx
     const selection = currentSelection()
+    // 分叉当时 worker 跑的 preset（拿不到就是部署默认）。记进 head 的 header，
+    // 恢复侧据此挂回同一套 preset（见下面 meta 里的注释）。
+    const parentPreset = ctx.sessionProjections?.stateOf?.(session, 'agentPreset') ?? undefined
 
     // 继承的是旧会话**最后一个 `turn/end` 之前**的全部事件（笔记："继承当前 session 的
     // 所有状态和模型上下文，但最后一个 step（正在进行的生成或工具执行）不继承"）。
@@ -1504,6 +1534,14 @@ export function apply(ctx, config) {
           parentSession: session.id,
           ...(containerMode ? { origin: 'subagent' } : {}),
           ...(fullSeed.length > 0 ? { isSeeded: true } : {}),
+          /**
+           * **记下 preset，别让它只能靠"当前进程里那份活组合"**（0.16.0）：
+           * `setup: composeInto` 只在创建这一刻有效；等这条会话从盘上被恢复时，
+           * 恢复侧只能靠 header / `agent-preset/selected` 投影决定挂哪套 preset。
+           * 官方 `fork()` 写的就是 `composition.agentPreset`——不写它，恢复会退回部署默认，
+           * 而"默认"不一定是分叉当时跑的那套（工具表、prompt 段、UI 贡献都跟着变）。
+           */
+          ...(parentPreset === undefined ? {} : { agentPreset: parentPreset }),
         },
         ...(fullSeed.length > 0
           ? { seed: fullSeed, inheritedEventCount }
@@ -2122,9 +2160,16 @@ export function apply(ctx, config) {
    *
    * **不在本进程 ≠ 不能收消息**（用户 2026-10 纠正："即使不在进程中，任意 session 也是可以恢复的"
    * ——我原先在 `fork_send` 里直接回绝，那确实是**自我限制**）。官方入口是 `ctx.agents.resume`：
-   * "Load a persisted session and resume an agent on it through the registered factory"，
-   * 与客户端打开一条旧会话（`sessions.open`）走的是**同一条路**（实测：点开一张"未运行"的卡，
-   * 它的 agent 就活了）。插件本来就在用 `agents` 这个服务（`create`/`get`）⇒ 不需要新依赖。
+   * "Load a persisted session and resume an agent on it through the registered factory"。
+   * 插件本来就在用 `agents` 这个服务（`create`/`get`）⇒ 不需要新依赖。
+   *
+   * ⚠️ 但**同一个入口 ≠ 同一条路**（0.16.0 修的真 bug）：客户端打开一条旧会话时，
+   * `session-controller` 的 `resumeObserved()` 会先 `composeAgent()`（解析 preset 并 mount）
+   * 再把 `agentOptions` + `setup` 一起传给 `resume`。只调 `resume({resumeSessionId})` 是
+   * **裸恢复**，恢复出来的 agent 既没有模型也没有 preset：turn 在 prompt 组装阶段立刻失败
+   * （`prompt variable "{{model}}" has no value … (section "deployment:persona-prefix")`），
+   * 回注的内容因此**一次都没落到转写上**；而这条 agent 一旦活下来，界面打开那条会话时
+   * 还会渲染成空转写（只剩「加载更早」与输入框，见 `composeForResume` 的注释）。
    *
    * 两点注意：① 它要拿**写租约**（`persistence.open(id, 'write')`）⇒ 同一条会话正被另一个进程
    * 打开时会失败（如实回报，不重试、不抢）；② resume 返回 AgentHandle，创建归调用上下文所有；
@@ -2138,8 +2183,16 @@ export function apply(ctx, config) {
       debug('resume.unsupported', { session: sessionId })
       return undefined
     }
+    const selection = currentSelection()
+    const options = {
+      resumeSessionId: sessionId,
+      ...(selection === undefined || selection === null
+        ? {}
+        : { agentOptions: { provider: selection.provider, model: selection.model } }),
+      ...(composeForResume === undefined ? {} : { setup: composeForResume }),
+    }
     try {
-      await ctx.agents.resume({ resumeSessionId: sessionId })
+      await ctx.agents.resume(options)
     } catch (error) {
       debug('resume.failed', { session: sessionId, error: String(error) })
     }

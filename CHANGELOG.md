@@ -3,6 +3,34 @@
 面向使用者的变更记录。本插件遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)：
 `0.x` 期间新增功能与行为变更进 **minor**（patch 只放修 bug）。
 
+## 0.16.0
+
+### 修复
+
+- **重启后回注只"投递成功"却什么都没发生，打开分叉会话还是一片空白**。两个症状同一条根因：
+  插件恢复一条**不在本进程**的会话时，只调了 `ctx.agents.resume({ resumeSessionId })`，
+  没带模型选择（`agentOptions`）和 preset 组合（`setup`）。恢复出来的 agent 于是既没有模型
+  也没有 preset：
+
+  - 回注投递成功、turn 也开了，但模型请求根本没发出去 —— 每一轮都在 prompt 组装阶段立刻失败
+    （`prompt variable "{{model}}" has no value for this assembly (section "deployment:persona-prefix")`），
+    注入的消息永远落不到转写上；
+  - 打开这条会话时转写渲染成**全空**，只剩最上面的「加载更早」和最下面的输入框。
+
+  现在恢复走的是官方 `session-controller` 打开旧会话的同一套组合（解析会话的 preset 并 mount、
+  带部署的模型选择），与它在界面上被打开时完全一致。同一批修复还让分叉会话的 header 记下
+  **分叉当时 worker 跑的 preset**（官方 `fork()` 一直这么做），恢复侧因此能挂回同一套 preset，
+  而不是退回部署默认。
+
+  验证：隔离实例 + 用户那条真实会话（标题「排查小米遥控器按键失灵」，1.2 万条事件）——
+  裸恢复后打开只剩 2 个节点（空转写）；按修复后的组合恢复则 139 个节点、内容完整。
+
+### 兼容
+
+- 工具面、页签、血缘存储、health 契约都没变；`fork_list` / `fork_send` / `fork_cancel` 行为不变。
+- 新分叉的 header 多一个可选的 `agentPreset`（只在能读到 worker 的 preset 时写）。
+- 仍需要 **dsh ≥ 0.2.0**。
+
 ## 0.15.0
 
 ### 新增

@@ -1,6 +1,6 @@
 {
   "name": "@vlln/dsh-autofork",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Agent 忙时自动分叉会话：你新发的指令立刻在新会话里得到响应，旧会话留在后台跑完并把结果回注（DeepSeek Harness 插件）",
   "license": "MIT",
   "icon": "icon.svg",
@@ -41,7 +41,9 @@
     "deepseek-harness",
     "agent",
     "branch",
-    "automation"
+    "automation",
+    "dsh-plugin",
+    "autofork"
   ],
   "dsh": {
     "bundle": {
@@ -58,5 +60,17 @@
       ],
       "platform": "web"
     }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "vlln",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vlln/dsh-autofork.git"
+  },
+  "homepage": "https://github.com/vlln/dsh-autofork#readme",
+  "bugs": {
+    "url": "https://github.com/vlln/dsh-autofork/issues"
   }
 }

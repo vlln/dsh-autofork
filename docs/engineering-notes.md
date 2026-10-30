@@ -1118,6 +1118,29 @@ A ←── 接管 ── B ←── 接管 ── C
 **worker → head，且只转 worker 的最后一条回复**（不转整个 turn 的事件流水——那是日志，
 会淹掉结论）。worker 侧由注入的分叉提示要求它把收尾写成总结。
 
+### 恢复一条不在本进程的会话：必须带模型与 preset（0.16.0）
+
+`fork_send` 与「A 跑完回注」都可能遇到**目标不在本进程**的会话，入口是
+`ctx.agents.resume({ resumeSessionId })`。**只传 `resumeSessionId` 是错的**：
+
+- 没有 `agentOptions` ⇒ `agent.options.model` 是 `undefined`；`dsh-agent-loop` 的
+  `systemPrompt.variable('model', ctx => ctx.agent?.options.model)` 取到 undefined ⇒
+  `dsh-system-prompt` 的插值器在 persona 段抛
+  `prompt variable "{{model}}" has no value for this assembly (section "deployment:persona-prefix")`
+  ⇒ 该 turn 立刻以 `error` 收尾，**回注的消息一次都没落到转写上**（用户实测的
+  「A 跑完回注到 B，B 什么都没发生」）。
+- 没有 `setup` ⇒ 恢复出来的 agent 一套 preset 都没挂（工具表、prompt 段、per-agent UI 贡献全缺）。
+  这条 agent 一旦活下来，客户端**打开**它时转写是全空的：隔离实例里同一份日志，冷打开 139 个
+  `[data-chat-flow]` 节点，裸恢复后只剩 2 个（只剩「加载更早」+ 输入框）。
+
+官方 `session-controller` 打开旧会话走的是 `resumeObserved()`：先 `composeAgent()` 解析 preset
+并 `mount`，再把 `agentOptions` + `setup` 一起交给 `resume`。插件的 `reviveAgent()` /
+`composeForResume()` 现在与它同形。另：`spawnHead` 把 worker 的 preset 记进 head 的
+`meta.agentPreset`（官方 `fork()` 也写），恢复侧才挂得回同一套 preset，而不是退回部署默认。
+
+**判据**：读**调用方**（`resumeObserved`）而不是只看 `agents.resume` 的注释——
+"同一个 API 入口"不等于"同一条路"。
+
 ### 参数：几条取舍的来由
 
 ### 为什么默认不设"step 年龄"门槛
