@@ -150,6 +150,7 @@ window.__ModuleLoader__.load({
         'takeover.error.noConfirm': '当前环境无法显示确认，请在浏览器中重试',
         'takeover.error.receiptMismatch': '接管回执不匹配，请刷新确认状态',
         'takeover.error.failed': '{name} 接管失败：{error}',
+        'takeover.error.notNative': '{name} 接管失败：这条分叉不是本插件创建的（dsh 0.2.2 起官方分叉不再记录父会话），无法接管',
         /* 手动分叉：队列行按钮 */
         'fork.button.idle': '分叉',
         'fork.button.busy': '分叉中…',
@@ -237,6 +238,7 @@ window.__ModuleLoader__.load({
         'takeover.error.noConfirm': 'This environment cannot show a confirmation dialog; retry in a browser',
         'takeover.error.receiptMismatch': 'Takeover receipt did not match; refresh to confirm the state',
         'takeover.error.failed': '{name}: takeover failed: {error}',
+        'takeover.error.notNative': '{name}: takeover failed: this fork was not created by this plugin (official forks no longer record a parent session since dsh 0.2.2), so it cannot be taken over',
         /* Manual fork: queue-row button */
         'fork.button.idle': 'Fork',
         'fork.button.busy': 'Forking…',
@@ -329,7 +331,10 @@ window.__ModuleLoader__.load({
           body: JSON.stringify({ sessionId: sessionId, confirmed: true }),
         })
         var body = await response.json()
-        if (response.ok !== true || body?.ok !== true) throw new Error(body?.error || 'http-' + response.status)
+        if (response.ok !== true || body?.ok !== true) {
+          if (body?.error === 'not-native-direct-child') throw new Error(t('takeover.error.notNative', { name: childName }))
+          throw new Error(body?.error || 'http-' + response.status)
+        }
         if (body.sessionId !== sessionId || body.parentId !== node.parentId) throw new Error(t('takeover.error.receiptMismatch'))
         takeoverRequests.set(sessionId, { success: true })
       } catch (error) {

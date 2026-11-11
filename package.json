@@ -61,6 +61,10 @@
       "platform": "web"
     }
   },
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
   "publishConfig": {
     "access": "public"
   },

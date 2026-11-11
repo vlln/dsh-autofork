@@ -268,6 +268,42 @@ export function apply(ctx, config) {
   /** 已注册的调度工具名，供 health 探针报告（挂载证明的一部分）。 */
   const exposedToolNames = []
 
+  /* --------------------------- 投影读取（dsh 0.2.2） --------------------------- */
+
+  /**
+   * 读会话的 turn/step 边界。
+   *
+   * dsh 0.2.2 起 registry 级 `ctx.sessionProjections.stateOf(session, key)` **已废弃**
+   * （每个 key 首次读会打一条 deprecation warning，且没有 owner 时返回 `undefined`）。
+   * 官方替代是**拥有该投影的域服务**：`ctx.agents.turnBoundaryOf(session)`——dsh-agent
+   * 在 `[Service.init]` 里 `await` 注册投影并持有 handle，返回同一份状态
+   * （`openTurnStartSeq` / `lastStepStartSeq` / `lastStepBoundary` / `lastTurn`）。
+   *
+   * 旧路径保留为回退：一是兼容 0.2.1（`turnBoundaryOf` 是 0.2.2 新增），二是 mock ctx
+   * 的单测里没有 `agents.turnBoundaryOf`。回退只在方法缺席时发生，不是"结果为空就回退"，
+   * 所以不会掩盖真实状态。
+   * @param {any} session 会话。
+   * @returns {{openTurnStartSeq: number|null, lastStepStartSeq: number|null,
+   *   lastStepBoundary: {kind: 'start'|'end', seq: number}|null, lastTurn: number}|undefined}
+   */
+  function readTurnBoundary(session) {
+    const agents = ctx.agents
+    if (typeof agents?.turnBoundaryOf === 'function') return agents.turnBoundaryOf(session)
+    return ctx.sessionProjections?.stateOf?.(session, 'turnBoundary')
+  }
+
+  /**
+   * 读会话记录里的 preset id（`undefined` ⇒ 部署默认）。
+   *
+   * 同样从 registry 级 `stateOf` 迁到 owning service：`agentPresets.presetForSession(session)`
+   * （由 dsh-agent-preset-registry 提供）。`agentPresets` 不在本插件的顶层 inject 里，
+   * 所以这里不直接 `ctx.agentPresets`（cordis 对未声明的服务属性取值会抛错），而是由下面
+   * `ctx.inject(['agentPresets'], …)` 在服务可用时替换成正式实现；替换前/替换后都保留
+   * `stateOf` 回退，自定义组合或 mock 里 agentPresets 缺席时行为与旧版一致。
+   * @type {(session: any) => string|undefined}
+   */
+  let readPreset = (session) => ctx.sessionProjections?.stateOf?.(session, 'agentPreset') ?? undefined
+
   /* ------------------------------ 可选能力 ------------------------------ */
 
   let composeInto = () => undefined
@@ -294,9 +330,13 @@ export function apply(ctx, config) {
   ctx.inject(['agentPresets'], (capabilityCtx) => {
     const presets = capabilityCtx.agentPresets
     composeInto = (agentCtx, parentCtx) => presets.composeFrom(agentCtx, parentCtx)
+    // owning service 可用时改走 `presetForSession`（见 readPreset 的注释）；缺席则保持旧路径。
+    if (typeof presets?.presetForSession === 'function') {
+      readPreset = (session) => presets.presetForSession(session) ?? undefined
+    }
     composeForResume = async (agentCtx, agent) => {
       if (typeof presets?.resolve !== 'function' || typeof presets?.mount !== 'function') return
-      const recorded = ctx.sessionProjections?.stateOf?.(agent.session, 'agentPreset')
+      const recorded = readPreset(agent.session)
       const resolved = await presets.resolve(recorded ?? undefined)
       await presets.mount(agentCtx, resolved.id)
     }
@@ -903,6 +943,9 @@ export function apply(ctx, config) {
     await settleLineage()
     const edge = nativeEdges.get(childId)
     if (edge === undefined || recordByHead.has(childId) || lineage?.edgeOf(childId)) {
+      // dsh 0.2.2 起官方普通分叉不再写 `parentSession`（见 src/relationships.mjs 的注释），
+      // 所以它们不在 nativeEdges 里、会落到这个分支。错误码保持稳定，客户端把它翻成
+      // 一句人话（client/index.js 的 `takeover.error.notNative`）。
       return { ok: false, error: 'not-native-direct-child', status: 409 }
     }
     const parentId = edge.workerId
@@ -927,7 +970,7 @@ export function apply(ctx, config) {
       try {
         const parent = ctx.agents.get(parentId)
         const events = parent?.session?.snapshotEvents?.() ?? []
-        const boundary = parent === undefined ? undefined : ctx.sessionProjections.stateOf(parent.session, 'turnBoundary')
+        const boundary = parent === undefined ? undefined : readTurnBoundary(parent.session)
         const start = boundary?.openTurnStartSeq
         const inFlight = start == null ? [] : events.filter(event => event.seq >= start)
         const progress = parent === undefined ? L('inject.resumeUnavailable')
@@ -989,7 +1032,7 @@ export function apply(ctx, config) {
     }
 
     const session = agent.session
-    const projection = ctx.sessionProjections.stateOf(session, 'turnBoundary')
+    const projection = readTurnBoundary(session)
     if (projection === undefined || projection.openTurnStartSeq === null) {
       debug('skip.no-open-turn', { agent: agent.id, hasProjection: projection !== undefined })
       return
@@ -1102,8 +1145,10 @@ export function apply(ctx, config) {
    *
    * 判据用持久事实而不是内存记录，因为要能挡住"还没登记就先收到消息"的瞬间：
    *  · 本插件容器模式建的实例：`origin === 'subagent'`；
-   *  · 任何**声明了父会话**的会话（容器模式的实例、官方普通分叉、扁平模式建的 head
-   *    ——三者都写 `parentSession`，见 `spawnHead` 的 meta 注释）；
+   *  · 任何**声明了父会话**的会话（容器模式的实例、本插件建的扁平 head——两者都写
+   *    `parentSession`，见 `spawnHead` 的 meta 注释）。**注意 dsh 0.2.2 起官方普通分叉
+   *    不再写 `parentSession`**，所以这条对"官方 UI 分叉出来的会话"不再命中（见
+   *    `src/relationships.mjs` 的 `ordinaryFork` 注释）；
    *  · 兜底：它已经在 `recordByHead` 里（是本插件的某条实例）。
    *
    * 语义上就是用户那句："容器 = 你新建的那条顶层会话；实例 = 它里面的 agent"。
@@ -1195,7 +1240,7 @@ export function apply(ctx, config) {
       return
     }
     try {
-      await spawnHead(container, message, ctx.sessionProjections.stateOf(container.session, 'turnBoundary'), cut, { rebind })
+      await spawnHead(container, message, readTurnBoundary(container.session), cut, { rebind })
       showUserMessage(container.session, message)
       debug('container.spawned', { container: container.id, rebind })
     } catch (error) {
@@ -1440,7 +1485,7 @@ export function apply(ctx, config) {
     const selection = currentSelection()
     // 分叉当时 worker 跑的 preset（拿不到就是部署默认）。记进 head 的 header，
     // 恢复侧据此挂回同一套 preset（见下面 meta 里的注释）。
-    const parentPreset = ctx.sessionProjections?.stateOf?.(session, 'agentPreset') ?? undefined
+    const parentPreset = readPreset(session)
 
     // 继承的是旧会话**最后一个 `turn/end` 之前**的全部事件（笔记："继承当前 session 的
     // 所有状态和模型上下文，但最后一个 step（正在进行的生成或工具执行）不继承"）。
@@ -1518,18 +1563,27 @@ export function apply(ctx, config) {
            *     && data.sessionId !== header.id) throw …
            * ```
            *
-           * 也就是：**当代的 delivery 标记只有在"header 声明了父会话 + 落在继承前缀里"
-           * 时才允许记别人的会话 id**。而 seed 是父会话已完成前缀的**逐字拷贝**
-           * （官方 `buildForkSeed` 也是逐字拷贝），父会话用官方 API 跑过就会在里面留下
-           * `delivery-accepted`（`dsh-session-log-deepseek` 每一轮 2xx 后追加一条）——
-           * 那些标记记的是**父会话**的 id。于是：**有 seed + 没有 `parentSession` =
-           * 一条写进去就再也读不出来的日志**（当下不报错，因为活会话在内存里；
-           * 下次从盘上重新打开时必炸，重启、重装、换进程都算）。
+           * 在 **session format v3 及更早**的校验器里（含 v0→v1 / v1→v2 的迁移路径），
+           * 继承前缀里的 delivery 标记**只有在"header 声明了父会话"时才被豁免**；
+           * seed 是父会话已完成前缀的**逐字拷贝**（官方 `buildForkSeed` 也是逐字拷贝），
+           * 父会话用官方 API 跑过就会在里面留下 `delivery-accepted`
+           * （`dsh-session-log-deepseek` 每轮 2xx 后追加一条），那些标记记的是**父会话的 id**
+           * ⇒ 有 seed + 没有 `parentSession` = 一条写进去就再也读不出来的日志
+           * （当下不报错，因为活会话在内存里；下次从盘上打开才炸——这正是 2026-10 的那个 bug）。
            *
-           * 官方普通分叉（`session-controller` 的 `fork()`）正是这么写的：
-           * `meta: { parentSession: source.header.id, isSeeded: true }`——**没有 `origin`**。
-           * 所以写上它与"head 是普通顶层会话"并不矛盾：`origin` 才是层级表达，
-           * 客户端只在 `origin === 'subagent'` 时才走子会话寻址/面包屑/实例树。
+           * **但 0.2.2（v4）起规则变了**：`assertReleasedV4Relationships`
+           * （`dsh-session-format-v3-to-v4/lib/index.js`）只校验
+           * `event.seq >= inheritedEventCount` 的标记必须等于本会话 id，
+           * **继承前缀里的标记不再看 `parentSession`**。所以官方普通分叉从 0.2.2 起
+           * 不再写它（`dsh-api-session-controller/lib/index.js` 的 `fork()`：`meta` 只有
+           * `cwd / isSeeded / agentPreset`；`SessionHeader.parentSession` 的文档也改成
+           * "Ordinary forks omit this field"）。
+           *
+           * 本插件**继续写** `parentSession`，理由：① 兼容 0.2.1（v3 校验器）；② v4 校验器
+           * 接受它；③ `nativeEdges` 靠它发现"本插件建的分叉"——官方分叉不再可被发现，
+           * 见 `src/relationships.mjs` 的注释。`origin` 才是层级表达，客户端只在
+           * `origin === 'subagent'` 时才走子会话寻址/面包屑/实例树，所以写上它与
+           * "head 是普通顶层会话"不矛盾。
            */
           parentSession: session.id,
           ...(containerMode ? { origin: 'subagent' } : {}),
@@ -1875,7 +1929,7 @@ export function apply(ctx, config) {
       debug('answer.empty', { instance: instance.id })
       return
     }
-    const projection = ctx.sessionProjections.stateOf(container.session, 'turnBoundary')
+    const projection = readTurnBoundary(container.session)
     if (projection !== undefined && projection.openTurnStartSeq !== null) {
       // 容器正开着它自己的 turn（这正是"分叉"发生时的常态：容器在跑 A 的活）。
       //
@@ -2680,7 +2734,7 @@ export function apply(ctx, config) {
       .find(candidate => candidate?.id === messageId)
     if (message === undefined) return { ok: false, reason: 'not-queued', status: 409 }
 
-    const projection = ctx.sessionProjections.stateOf(agent.session, 'turnBoundary')
+    const projection = readTurnBoundary(agent.session)
     if (projection === undefined || projection.openTurnStartSeq === null) {
       return { ok: false, reason: 'no-open-turn', status: 409 }
     }

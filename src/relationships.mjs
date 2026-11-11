@@ -1,4 +1,23 @@
-/** Header lineage is descriptive; takeover selection is an independent directed graph. */
+/**
+ * Header lineage is descriptive; takeover selection is an independent directed graph.
+ *
+ * ⚠️ **dsh 0.2.2 起官方普通分叉不再写 `parentSession`**
+ * （`@deepseek-ai/dsh-api-session-controller` 的 `fork()` 只写
+ * `cwd / isSeeded / agentPreset`；`SessionHeader.parentSession` 的文档改成
+ * "Ordinary forks omit this field"）。所以这条边只能发现**本插件自己建的**分叉
+ * （`spawnHead` 仍显式写 `parentSession`，v4 校验器接受）。后果：
+ * 用户在官方 GUI 里 fork 出来的会话不再进入 `nativeEdges`——家族/分叉视图看不到它们，
+ * `takeOver()` 会以 `not-native-direct-child` 拒绝。
+ *
+ * 影响面（逐个消费方核对过）：**自动分叉 / 回注 / `fork_*` 工具 / MUTE 都不走这条边**
+ * （它们用内存记录 + 存储域血缘 `lineage`），只有"官方分叉的家族展示与接管"退化。
+ *
+ * 将来若要恢复"官方分叉"的发现，候选做法是读继承前缀里当代
+ * `session-log-deepseek/delivery-accepted` 的 `data.sessionId`（父会话 id）反推；
+ * **未实测，验证前不要启用**。
+ * @param {any} header 会话 header。
+ * @returns {{workerId: string, createdAt: number, kind: 'fork'}|undefined}
+ */
 export function ordinaryFork(header) {
   return typeof header?.id === 'string' && typeof header.parentSession === 'string'
     && header.parentSession !== '' && header.origin !== 'subagent'

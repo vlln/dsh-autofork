@@ -21,8 +21,11 @@ dsh plugin --profile web add @vlln/dsh-autofork
 
 | dsh 版本 | 状态 |
 |---|---|
+| `0.2.2-rc.1` | ✅ 已验证：隔离实例 boot + health 探针 + 门禁 + 213 项单测（2026-11 实测）。投影读取迁到 owning service；适配「官方普通分叉不再写 `parentSession`」的语义变化 |
 | `0.2.0-rc.2` | ✅ 已验证：手动分叉排队与设置面（2026-10 实测） |
 | `0.1.2-rc.1` | 早期行为层证据的基线；未在 0.2.0 线复验 |
+
+已知行为差异（dsh 0.2.2 起）：官方界面里的普通 fork 不再记录父会话 id，因此本插件无法再发现并「接管」这类分叉（自己创建的分叉不受影响，自动分叉 / 回注 / `fork_*` 工具照常）。详见[开发说明](docs/engineering-notes.md)。
 
 换 dsh 版本后若某个能力失灵，先查 [开发说明](docs/engineering-notes.md) 的验证章节；跨基线复核前不要把旧结论当事实用。
 
